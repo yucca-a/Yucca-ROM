@@ -1,0 +1,638 @@
+name: Build Samsung Device
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+    inputs:
+      device:
+        description: '设备代号 (dm1q/dm2q/dm3q/e1q/e2q/e3q/pa1q/pa2q/pa3q)'
+        required: true
+        type: string
+      chc_url:
+        description: 'CHC SAMFW ZIP 下载链接 (留空自动从 Samsung FUS 获取最新)'
+        required: false
+        type: string
+      gpi_artifact:
+        description: 'GPI bundle artifact 名称 (gpi-bundle-s23 / s24 / s25)'
+        required: true
+        type: string
+      series:
+        description: '系列 (s23/s24/s25)'
+        required: true
+        type: string
+      skip_ksu:
+        required: false
+        default: false
+        type: boolean
+      swap_boot_kernel:
+        description: '替换 boot.img kernel 为 Kokuban LKM (修 init_boot KSU 启动问题)'
+        required: false
+        default: true
+        type: boolean
+      upload_provider:
+        required: false
+        default: 'gofile'
+        type: string
+      create_release:
+        required: false
+        default: 'true'
+        type: string
+
+env:
+  YAKIT_REPO: yucca-a/YAKit
+  PROFILES_REPO: yucca-a/YAK-Profiles
+  PROJECT: ci_build
+  BRAND: Samsung
+
+jobs:
+  build:
+    name: Build ${{ inputs.device }}
+    if: github.repository == 'yucca-a/Yucca-ROM'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      # ━━━ 0. 释放磁盘空间 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Disk space check
+        run: df -h /
+
+      # ━━━ 1. Checkout + 拉取 YAKit + YAK-Profiles ━━━━━━━━━━━━━━━━━━━━━━
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      - name: Clone YAKit
+        run: |
+          git clone --depth 1 \
+            "https://${{ secrets.YAKIT_TOKEN }}@github.com/${{ env.YAKIT_REPO }}.git" \
+            YAKit
+          echo "[✓] YAKit cloned"
+
+      - name: Clone and merge YAK-Profiles (Samsung)
+        env:
+          GIT_LFS_SKIP_SMUDGE: '1'
+          GH_TOKEN: ${{ secrets.YAKIT_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://${{ secrets.YAKIT_TOKEN }}@github.com/${{ env.PROFILES_REPO }}.git" \
+            YAK-Profiles
+          BRAND="${{ env.BRAND }}"
+          # 从 GitHub Release (apks-v1) 拉取 APK 资产, sha256 校验
+          python3 YAK-Profiles/scripts/fetch_apks.py --brand "${BRAND}" --root YAK-Profiles
+          # 通用脚本 (upload.sh 等)
+          cp -r YAK-Profiles/scripts/. YAKit/scripts/
+          # 三星品牌特定内容
+          cp -r "YAK-Profiles/${BRAND}/CONFIGS/." YAKit/CONFIGS/
+          cp -r "YAK-Profiles/${BRAND}/fixes/."   YAKit/fixes/
+          [[ -d "YAK-Profiles/${BRAND}/scripts" ]] && \
+            cp -r "YAK-Profiles/${BRAND}/scripts/." YAKit/scripts/
+          [[ -d "YAK-Profiles/${BRAND}/apks" ]] && \
+            cp -r "YAK-Profiles/${BRAND}/apks" YAKit/apks
+          echo "[✓] YAK-Profiles (${BRAND}) merged into YAKit"
+
+      # ━━━ 2. 加载设备配置 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Load device config
+        id: config
+        run: |
+          CONF="YAKit/CONFIGS/${{ inputs.device }}.conf"
+          if [[ ! -f "$CONF" ]]; then
+            echo "::error::配置文件不存在: $CONF"
+            exit 1
+          fi
+          set -a; source "$CONF"; set +a
+          {
+            echo "codename=$CODENAME"
+            echo "model=$MODEL"
+            echo "device_name=$DEVICE_NAME"
+            echo "series=${SERIES:-${{ inputs.series }}}"
+            echo "region=${REGION:-CHC}"
+            echo "android_version=${ANDROID_VERSION:-14.0}"
+            echo "remove_avb=${REMOVE_AVB:-true}"
+            echo "remove_encrypt=${REMOVE_ENCRYPT:-true}"
+            echo "ksu_patch=${KSU_PATCH:-true}"
+            echo "ksu_input=${KSU_INPUT:-init_boot}"
+            echo "fix_scripts=${FIX_SCRIPTS:-}"
+            echo "debloat=${DEBLOAT:-true}"
+            echo "upload_provider=${{ inputs.upload_provider || 'gofile' }}"
+          } >> "$GITHUB_OUTPUT"
+          echo "===== Device: $DEVICE_NAME ($CODENAME / $MODEL) ====="
+
+      # ━━━ 3. 安装系统依赖 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            python3 python3-pip python3-venv \
+            android-sdk-libsparse-utils \
+            lz4 xz-utils zstd brotli \
+            erofs-utils \
+            e2fsprogs \
+            p7zip-full \
+            aria2
+          pip install --break-system-packages pycryptodome
+
+      # ━━━ 4. 初始化 YAK .bin 环境 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Setup YAK .bin environment
+        run: |
+          cd YAKit
+          sudo bash .bin/setup-bin-env.sh --no-banner
+          echo "[✓] YAK .bin environment ready"
+
+      # ━━━ 5. 下载 GPI Bundle (从 TGY 提取的) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Download GPI bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.gpi_artifact }}
+          path: /tmp/gpi_bundle/
+
+      - name: Verify GPI bundle
+        run: |
+          echo "[*] GPI bundle 内容:"
+          find /tmp/gpi_bundle -type f | head -20
+          if [[ ! -d /tmp/gpi_bundle/priv-app/GooglePackageInstaller ]]; then
+            echo "::warning::GPI bundle 缺少 priv-app/GooglePackageInstaller"
+          fi
+
+      # ━━━ 6. 获取 SAMFW ZIP (chc_url 提供 → aria2 / 留空 → FUS 自动) ━━━
+      - name: Download SAMFW CHC ZIP
+        id: rom
+        run: |
+          mkdir -p YAKit/INPUT
+          URL="${{ inputs.chc_url }}"
+          if [[ -z "$URL" ]]; then
+            echo "[*] chc_url 为空, 走 Samsung FUS 自动获取最新固件 ..."
+            MODEL="${{ steps.config.outputs.model }}"
+            REGION="${{ steps.config.outputs.region }}"
+            if [[ -z "$MODEL" ]]; then
+              echo "::error::设备配置缺 MODEL, FUS 自动获取需 SM-XXXX"
+              exit 1
+            fi
+            ZIP_PATH=$(python3 YAK-Profiles/Samsung/scripts/fetch_samsung_firmware.py \
+              --model "$MODEL" --region "$REGION" --out-dir YAKit/INPUT)
+            FILENAME=$(basename "$ZIP_PATH")
+            echo "[✓] FUS 下载完成: $FILENAME"
+          else
+            # 从 URL 提取文件名 (去掉 query string)
+            FILENAME=$(basename "${URL%%\?*}")
+            [[ "$FILENAME" != *.zip ]] && FILENAME="SAMFW_${{ inputs.device }}.zip"
+            aria2c -x 8 -s 8 --console-log-level=warn \
+              -d YAKit/INPUT \
+              -o "$FILENAME" \
+              "$URL"
+          fi
+          ZIPSIZE=$(stat -c%s "YAKit/INPUT/$FILENAME")
+          echo "[✓] 就位: $FILENAME ($(numfmt --to=iec $ZIPSIZE))"
+          # 从文件名解析版本号 (SAMFW 命名: SM-S9180_xxx_S9180ZCU7EZK1...)
+          VERSION=$(echo "$FILENAME" | grep -oP '[A-Z0-9]{8,}(?=[._])' | head -1)
+          [[ -z "$VERSION" ]] && VERSION="$(date +%Y%m%d)"
+          {
+            echo "filename=$FILENAME"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      # ━━━ 7. 暂存 SAMFW ZIP (供步骤 19 重打包) ━━━━━━━━━━━━━━━━━━━━━━━━
+      # 解包后会清理 INPUT/, 但最终 samfw_repack.py 还需要原始 ZIP, 所以
+      # 先 hardlink 到 /tmp (零拷贝, 不占额外空间).
+      - name: Stash SAMFW ZIP
+        run: |
+          mkdir -p /tmp/samfw_orig
+          ln "YAKit/INPUT/${{ steps.rom.outputs.filename }}" \
+             "/tmp/samfw_orig/${{ steps.rom.outputs.filename }}"
+          ls -lh "/tmp/samfw_orig/"
+
+      # ━━━ 8. YAK 解包 ROM (extract_rom — 自动检测 SAMFW) ━━━━━━━━━━━━━━━
+      - name: Extract ROM
+        run: |
+          cd YAKit
+          mkdir -p "PROJECTS/${{ env.PROJECT }}"/{Config,ROM,Logs,_logical_temp,Build,Extracted}
+          echo "[*] 解包 SAMFW (流式 → Extracted/) ..."
+          sudo python3 yucca_android_kitchen.py --conf="\
+            ACTION=extract_rom,\
+            ZIP_ROM=${{ steps.rom.outputs.filename }},\
+            EXTRACT_DIR=$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted,\
+            PROJECT_NAME=${{ env.PROJECT }}"
+          echo "[✓] 解包完成"
+          echo "--- Extracted/ ---"
+          ls -lh "PROJECTS/${{ env.PROJECT }}/Extracted/" | head -30
+          echo "--- ROM/ (super 拆出的逻辑分区) ---"
+          ls "PROJECTS/${{ env.PROJECT }}/ROM/" | head -20
+
+      # ━━━ 9. 定位 .pit 文件 (从 SAMFW.zip 的 CSC / HOME_CSC tar.md5 里抽) ━━━━━━━━
+      # extract_rom 只处理 AP_*.tar.md5, .pit 住在 CSC_*.tar.md5 / HOME_CSC_*.tar.md5
+      # 里, 必须从 /tmp/samfw_orig/<zip> 里抽. tarball 头 8K 已包含 PIT (PIT 一般
+      # 是 tar 内靠前的小文件), 但为保险起见流式扫描整个 tar.
+      - name: Locate .pit file
+        id: pit
+        run: |
+          ZIP="/tmp/samfw_orig/${{ steps.rom.outputs.filename }}"
+          OUT=/tmp/samfw_orig
+          python3 - "$ZIP" "$OUT" <<'PY'
+          import sys, os, zipfile, tarfile, io
+          zip_path, out_dir = sys.argv[1], sys.argv[2]
+          os.makedirs(out_dir, exist_ok=True)
+          with zipfile.ZipFile(zip_path) as z:
+              names = z.namelist()
+              # PIT 通常只在 CSC_*.tar.md5 (HOME_CSC 一般没有), 先扫 CSC
+              cands = [n for n in names if os.path.basename(n).startswith('CSC_') and not os.path.basename(n).startswith('HOME_CSC_') and n.endswith('.tar.md5')]
+              cands += [n for n in names if os.path.basename(n).startswith('HOME_CSC_') and n.endswith('.tar.md5')]
+              for tar_name in cands:
+                  print(f'[*] 扫描 {tar_name}')
+                  with z.open(tar_name) as zf, \
+                       tarfile.open(fileobj=zf, mode='r|') as tf:
+                      for m in tf:
+                          if m.isfile() and m.name.lower().endswith('.pit'):
+                              dst = os.path.join(out_dir, os.path.basename(m.name))
+                              with open(dst, 'wb') as f:
+                                  f.write(tf.extractfile(m).read())
+                              print(f'[✓] PIT: {m.name} -> {dst} ({os.path.getsize(dst)} bytes)')
+                              # write GITHUB_OUTPUT
+                              go = os.environ.get('GITHUB_OUTPUT')
+                              if go:
+                                  with open(go, 'a') as g:
+                                      g.write(f'pit_file={dst}\n')
+                              sys.exit(0)
+              print('::warning::未在 SAMFW ZIP 的 CSC/HOME_CSC tar 里找到 .pit')
+              go = os.environ.get('GITHUB_OUTPUT')
+              if go:
+                  with open(go, 'a') as g:
+                      g.write('pit_file=\n')
+          PY
+
+      # ━━━ 10. 清理 INPUT + 释放空间 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Cleanup INPUT
+        run: |
+          cd YAKit
+          rm -f "INPUT/${{ steps.rom.outputs.filename }}"
+          # super.img 已被 extract_rom 拆为 ROM/{system,product,vendor,...}
+          rm -f "$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
+          df -h /
+
+      # ━━━ 11. 修复脚本 (fixes/) — 含 GPI 注入 ━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Run fix scripts
+        if: steps.config.outputs.fix_scripts != ''
+        env:
+          YUCCA_GPI_BUNDLE_DIR: /tmp/gpi_bundle
+        run: |
+          ROM_DIR="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/ROM"
+          for script in ${{ steps.config.outputs.fix_scripts }}; do
+            SCRIPT_PATH="$GITHUB_WORKSPACE/YAKit/fixes/$script"
+            if [[ -f "$SCRIPT_PATH" ]]; then
+              echo "[*] 执行: $script"
+              python3 "$SCRIPT_PATH" "$ROM_DIR"
+            else
+              echo "[!] 脚本不存在: $script" >&2
+            fi
+          done
+
+      # ━━━ 12. 精简 (Debloat via tasks.toml) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Debloat
+        if: steps.config.outputs.debloat == 'true'
+        run: |
+          cd YAKit
+          python3 -c "
+          import tomllib, shutil
+          from pathlib import Path
+
+          rom_dir = Path('PROJECTS/${{ env.PROJECT }}/ROM')
+          config = Path('CONFIGS/tasks.toml')
+          if not config.is_file():
+              print('[~] tasks.toml 不存在, 跳过精简')
+              exit(0)
+
+          tasks = tomllib.loads(config.read_text())['tasks']
+          removed = 0
+          for t in tasks:
+              if t.get('action') == 'remove':
+                  target = rom_dir / t['path']
+                  if target.exists():
+                      shutil.rmtree(target)
+                      print(f'  [-] {t[\"path\"]}')
+                      removed += 1
+                  else:
+                      print(f'  [~] Not found: {t[\"path\"]}')
+          print(f'[✓] 精简完成: {removed} 项已移除')
+          "
+
+      # ━━━ 13. Fstab 补丁 (去 AVB + 去加密) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Fstab patch
+        run: |
+          cd YAKit
+          echo "[*] Fstab 补丁 ..."
+          sudo python3 yucca_android_kitchen.py --conf="\
+            ACTION=fstab_patch,\
+            ROM_DIR=PROJECTS/${{ env.PROJECT }}/ROM,\
+            REMOVE_AVB=${{ steps.config.outputs.remove_avb }},\
+            REMOVE_ENCRYPT=${{ steps.config.outputs.remove_encrypt }}"
+
+      # ━━━ 13.5 重打包 vendor_boot ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Repack vendor_boot
+        run: |
+          cd YAKit
+          VB_SRC="PROJECTS/${{ env.PROJECT }}/ROM/vendor_boot"
+          VB_OUT="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/vendor_boot.img"
+          if [[ -d "$VB_SRC" && -d "$VB_SRC/.repack_info" ]]; then
+            echo "[*] 重打包 vendor_boot.img ..."
+            sudo python3 yucca_android_kitchen.py --conf="\
+              ACTION=boot_repack,\
+              SOURCE_DIR=$VB_SRC,\
+              OUTPUT_IMAGE=$VB_OUT"
+            echo "[✓] vendor_boot.img 已重新打包"
+          else
+            echo "[~] $VB_SRC 不存在, 跳过 vendor_boot 重打包"
+          fi
+
+      # ━━━ 14. Deodex (移除预编译缓存) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Deodex
+        run: |
+          cd YAKit
+          echo "[*] 移除预编译 oat/vdex 缓存 ..."
+          sudo python3 yucca_android_kitchen.py --conf="\
+            ACTION=deodex,\
+            PROJECT_NAME=${{ env.PROJECT }}"
+
+      # ━━━ 15. KernelSU 补丁 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: KSU patch
+        if: steps.config.outputs.ksu_patch == 'true' && inputs.skip_ksu != true
+        run: |
+          cd YAKit
+          INPUT="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/${{ steps.config.outputs.ksu_input }}.img"
+          OUTPUT="PROJECTS/${{ env.PROJECT }}/Build/${{ steps.config.outputs.ksu_input }}.img"
+          if [[ -f "$INPUT" ]]; then
+            echo "[*] KernelSU 补丁: ${{ steps.config.outputs.ksu_input }}.img ..."
+            sudo python3 yucca_android_kitchen.py --conf="\
+              ACTION=ksu_patch,\
+              INPUT_IMAGE=$INPUT,\
+              OUTPUT_IMAGE=$OUTPUT"
+            echo "[✓] KSU 补丁完成"
+          else
+            echo "[!] $INPUT 不存在, 跳过 KSU" >&2
+          fi
+
+      # ━━━ 16. 生成 project.conf ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Generate project.conf
+        run: |
+          cd YAKit
+          python3 scripts/gen_config.py \
+            "PROJECTS/${{ env.PROJECT }}" \
+            --device-conf "CONFIGS/${{ inputs.device }}.conf"
+
+      # ━━━ 17. Super 重打包 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Repack super.img
+        run: |
+          cd YAKit
+          echo "[*] 重打包 super.img ..."
+          sudo python3 yucca_android_kitchen.py --conf="\
+            ACTION=super_repack,\
+            PROJECT_NAME=${{ env.PROJECT }},\
+            OUTPUT_IMAGE=PROJECTS/${{ env.PROJECT }}/Build/super.img,\
+            VBMETA_DIR=$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
+          echo "[✓] super.img 重打包完成"
+          ls -lh "PROJECTS/${{ env.PROJECT }}/Build/"
+
+      # ━━━ 18. 收集 boot/init_boot/vendor_boot/vbmeta* → Build/ ━━━━━━━━━━
+      - name: Collect images to Build
+        run: |
+          cd YAKit
+          EXTRACTED="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
+          BUILD="PROJECTS/${{ env.PROJECT }}/Build"
+          echo "[*] 收集处理后镜像 → Build/"
+          for img in "$EXTRACTED/"*.img; do
+            [[ ! -f "$img" ]] && continue
+            NAME=$(basename "$img" .img)
+            BASE="${NAME%_a}"; BASE="${BASE%_b}"
+            # vbmeta 留给步骤 19 处理
+            if [[ "$BASE" == "vbmeta" || "$BASE" == "vbmeta_system" ]]; then
+              echo "  [~] 保留给 VBMeta 步骤: $NAME.img"
+              continue
+            fi
+            # init_boot: 若 KSU 已处理则保留 Build/ 中版本
+            if [[ "$BASE" == "init_boot" && -f "$BUILD/init_boot.img" ]]; then
+              echo "  [~] init_boot.img (KSU 已处理, 保留 Build/ 版本)"
+              continue
+            fi
+            mv "$img" "$BUILD/${BASE}.img"
+            echo "  [✓] ${BASE}.img"
+          done
+          echo "--- Build/ ---"
+          ls -lh "$BUILD/"
+
+      # ━━━ 18.5 替换 boot.img kernel 为 Kokuban LKM 内核 ━━━━━━━━━━━━━━━━━
+      # 三星 init_boot KSU 因内核安全限制无法启动, 用 YuzakiKokuban 编译的
+      # 去除限制内核替换 boot.img 内的 kernel 段, samfw_repack 会自动 lz4 压缩.
+      - name: Swap boot.img kernel (Kokuban LKM)
+        if: inputs.swap_boot_kernel != false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd YAKit
+          BUILD="PROJECTS/${{ env.PROJECT }}/Build"
+          BOOT="$BUILD/boot.img"
+          if [[ ! -f "$BOOT" ]]; then
+            echo "::warning::$BOOT 不存在, 跳过 kernel 替换"
+            exit 0
+          fi
+          OUT="$BUILD/boot.img.new"
+          python3 "$GITHUB_WORKSPACE/YAK-Profiles/Samsung/scripts/replace_boot_kernel.py" \
+            --series "${{ inputs.series }}" \
+            --boot-img "$BOOT" \
+            --output "$OUT" \
+            --magiskboot "$GITHUB_WORKSPACE/YAKit/.bin/magiskboot"
+          mv "$OUT" "$BOOT"
+          echo "[✓] boot.img kernel 已替换 (Kokuban LKM, ${{ inputs.series }})"
+          ls -lh "$BOOT"
+
+      # ━━━ 19. Build VBMeta All (AVB disabled) ━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Build VBMeta All
+        run: |
+          cd YAKit
+          EXTRACTED="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
+          BUILD="PROJECTS/${{ env.PROJECT }}/Build"
+          for vb in vbmeta vbmeta_system; do
+            SRC="$EXTRACTED/${vb}.img"
+            if [[ -f "$SRC" ]]; then
+              echo "[*] Build ${vb}.img (AVB disabled) ..."
+              sudo python3 yucca_android_kitchen.py --conf="\
+                ACTION=patch_vbmeta,\
+                VBMETA_SOURCE=$SRC,\
+                VBMETA_OUTPUT=$BUILD/${vb}.img,\
+                VBMETA_PARTS_DIR=$BUILD,\
+                VBMETA_FLAGS=3"
+              echo "[✓] ${vb}.img → Build/"
+            fi
+          done
+
+      # ━━━ 20. 释放空间 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Free space before SAMFW repack
+        run: |
+          cd YAKit
+          rm -rf "PROJECTS/${{ env.PROJECT }}/ROM"
+          rm -rf "PROJECTS/${{ env.PROJECT }}/_logical_temp"
+          rm -rf "$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
+          df -h /
+
+      # ━━━ 21. SAMFW 重打包 (生成 Odin tar.md5 集合) ━━━━━━━━━━━━━━━━━━━━
+      - name: SAMFW repack (Odin tar.md5)
+        id: samfw
+        run: |
+          cd YAKit
+          BUILD="PROJECTS/${{ env.PROJECT }}/Build"
+          PIT_ARG=""
+          if [[ -n "${{ steps.pit.outputs.pit_file }}" && -f "${{ steps.pit.outputs.pit_file }}" ]]; then
+            PIT_ARG="--pit-file ${{ steps.pit.outputs.pit_file }}"
+          fi
+          mkdir -p /tmp/samsung_out
+          python3 scripts/samfw_repack.py \
+            --samfw-zip "/tmp/samfw_orig/${{ steps.rom.outputs.filename }}" \
+            --build-dir "$BUILD" \
+            $PIT_ARG \
+            --out-dir /tmp/samsung_out \
+            --lz4-level 9
+          echo "--- /tmp/samsung_out/ ---"
+          ls -lh /tmp/samsung_out/
+          # 删除原始 SAMFW ZIP 释放空间
+          rm -f "/tmp/samfw_orig/${{ steps.rom.outputs.filename }}"
+          rm -rf "$BUILD"
+          df -h /
+
+      # ━━━ 22. 打包 Odin 刷机包 ZIP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Package Odin flashable ZIP
+        id: package
+        run: |
+          CODENAME="${{ steps.config.outputs.codename }}"
+          MODEL="${{ steps.config.outputs.model }}"
+          VERSION="${{ steps.rom.outputs.version }}"
+          TIMESTAMP=$(date +%Y%m%d)
+          OUTPUT_NAME="YuccaROM_${CODENAME}_${MODEL}_${VERSION}_${TIMESTAMP}"
+          echo "[*] 打包 ${OUTPUT_NAME}.zip ..."
+          # 添加 README
+          cat > /tmp/samsung_out/README.txt << EOF
+          YuccaROM for ${{ steps.config.outputs.device_name }} (${MODEL} / ${CODENAME})
+          Version: ${VERSION}
+          Built:   $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          === 刷入方式 (Odin) ===
+          1. 手机进入 Download Mode (音量下 + Bixby + 电源, 接上数据线)
+          2. 打开 Odin (Windows) 或 Heimdall (Linux/macOS)
+          3. 按以下槽位放置:
+             AP   → AP_${MODEL}_*_modified.tar.md5
+             BL   → BL_${MODEL}_*.tar.md5         (原厂未改, 可不刷)
+             CSC  → HOME_CSC_${MODEL}_*_modified.tar.md5  (保留数据)
+                    或 CSC_*.tar.md5 (清除数据, 含原厂 .pit)
+          4. 选项: 取消 "Auto Reboot" + "F. Reset Time" (首次刷可勾)
+          5. Start
+
+          === 已应用修改 ===
+          - 去 AVB (vbmeta flags=3)
+          - 去强制加密
+          - KernelSU LKM (init_boot.img)
+          - Deodex (移除预编译 oat/vdex)
+          - 精简 (移除 Bixby/SamsungAccount/Galaxy 商店等)
+          - GMS 三件套注入 (GooglePackageInstaller / GooglePlayServices)
+          - 修复中国版 Google 服务限制
+          - SBrowser 转预装可卸载
+          - 添加 CMFA (Magisk 的 Manager)
+          - build.prop: ro.build.display.id 后缀 By_Yucca
+
+          === 注意 ===
+          ⚠️ 自动构建产物, 自行测试, 出现任何问题概不负责
+          ⚠️ KernelSU 需在系统中安装官方 APK 激活 root
+          ⚠️ 三星机器刷修改包后 Knox 永久熔断 (0x1)
+          EOF
+
+          cd /tmp/samsung_out
+          zip -r -1 "/tmp/${OUTPUT_NAME}.zip" . -x "*.DS_Store"
+          ARCHIVE="/tmp/${OUTPUT_NAME}.zip"
+          ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE" | numfmt --to=iec)
+          {
+            echo "archive=$ARCHIVE"
+            echo "archive_name=${OUTPUT_NAME}.zip"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "[✓] 产物: ${OUTPUT_NAME}.zip ($ARCHIVE_SIZE)"
+
+      # ━━━ 23. 上传到云盘 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Upload to cloud
+        id: upload
+        run: |
+          chmod +x YAKit/scripts/upload.sh
+          bash YAKit/scripts/upload.sh \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.config.outputs.upload_provider }}"
+          if [[ -f upload_url.txt ]]; then
+            echo "download_url=$(cat upload_url.txt)" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+          PIXELDRAIN_KEY: ${{ secrets.PIXELDRAIN_KEY }}
+
+      # ━━━ 23.5 保存构建信息 (供 build-all 汇总 Release 使用) ━━━━━━━━━━━
+      - name: Save release info artifact
+        if: inputs.create_release == 'false'
+        run: |
+          mkdir -p /tmp/release-info
+          {
+            echo "codename=${{ steps.config.outputs.codename }}"
+            echo "model=${{ steps.config.outputs.model }}"
+            echo "device_name=${{ steps.config.outputs.device_name }}"
+            echo "series=${{ steps.config.outputs.series }}"
+            echo "version=${{ steps.rom.outputs.version }}"
+            echo "archive_name=${{ steps.package.outputs.archive_name }}"
+            echo "download_url=${{ steps.upload.outputs.download_url }}"
+            echo "upload_provider=${{ steps.config.outputs.upload_provider }}"
+            echo "ksu_applied=${{ steps.config.outputs.ksu_patch == 'true' && inputs.skip_ksu != true }}"
+            echo "remove_avb=${{ steps.config.outputs.remove_avb }}"
+            echo "remove_encrypt=${{ steps.config.outputs.remove_encrypt }}"
+            echo "debloat=${{ steps.config.outputs.debloat }}"
+          } > /tmp/release-info/info.env
+
+      - name: Upload release info
+        if: inputs.create_release == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-info-${{ steps.config.outputs.codename }}
+          path: /tmp/release-info/info.env
+          retention-days: 1
+
+      # ━━━ 24. 上传 Artifact ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.archive_name }}
+          path: ${{ steps.package.outputs.archive }}
+          retention-days: 3
+          if-no-files-found: ignore
+
+      # ━━━ 25. 构建摘要 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      - name: Build summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## YuccaROM Samsung — ${{ steps.config.outputs.device_name }}
+
+          | 项目 | 值 |
+          |------|-----|
+          | **设备** | ${{ steps.config.outputs.device_name }} |
+          | **代号** | ${{ steps.config.outputs.codename }} |
+          | **型号** | ${{ steps.config.outputs.model }} |
+          | **系列** | ${{ inputs.series }} (CHC) |
+          | **版本** | ${{ steps.rom.outputs.version }} |
+          | **去 AVB** | ${{ steps.config.outputs.remove_avb == 'true' && '✅' || '❌' }} |
+          | **DATA 解密** | ${{ steps.config.outputs.remove_encrypt == 'true' && '✅' || '❌' }} |
+          | **KernelSU** | ${{ steps.config.outputs.ksu_patch == 'true' && '✅' || '❌' }} |
+          | **Deodex** | ✅ |
+          | **精简** | ${{ steps.config.outputs.debloat == 'true' && '✅' || '❌' }} |
+          | **上传** | ${{ steps.config.outputs.upload_provider }} |
+          EOF

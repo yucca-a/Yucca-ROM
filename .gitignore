@@ -1,0 +1,16 @@
+# Build outputs
+output/
+*.tar.gz
+*.img
+*.zip
+
+# YAKit clone
+YAKit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

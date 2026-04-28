@@ -1,0 +1,133 @@
+name: _extract-samsung-tgy (reusable)
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      series:
+        description: 'Samsung 系列 (s23/s24/s25)'
+        required: true
+        type: string
+      tgy_url:
+        description: 'TGY SAMFW ZIP 链接 (留空自动 FUS 拉取)'
+        required: false
+        type: string
+
+env:
+  YAKIT_REPO: yucca-a/YAKit
+  PROFILES_REPO: yucca-a/YAK-Profiles
+
+jobs:
+  extract:
+    name: Extract GPI from TGY (${{ inputs.series }})
+    if: github.repository == 'yucca-a/Yucca-ROM'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Resolve TGY model for series
+        id: model
+        run: |
+          case "${{ inputs.series }}" in
+            s23) MODEL=SM-S9180 ;;
+            s24) MODEL=SM-S9280 ;;
+            s25) MODEL=SM-S9380 ;;
+            *) echo "::error::未知 Samsung 系列: ${{ inputs.series }}"; exit 1 ;;
+          esac
+          echo "tgy_model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "[*] series=${{ inputs.series }} → TGY_MODEL=$MODEL"
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+
+      - name: Clone YAKit
+        run: |
+          git clone --depth 1 \
+            "https://${{ secrets.YAKIT_TOKEN }}@github.com/${{ env.YAKIT_REPO }}.git" \
+            YAKit
+
+      - name: Clone YAK-Profiles
+        run: |
+          git clone --depth 1 \
+            "https://${{ secrets.YAKIT_TOKEN }}@github.com/${{ env.PROFILES_REPO }}.git" \
+            YAK-Profiles
+          cp -r YAK-Profiles/Samsung/scripts/. YAKit/scripts/
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            python3 python3-pip \
+            android-sdk-libsparse-utils \
+            lz4 xz-utils zstd brotli erofs-utils e2fsprogs \
+            p7zip-full aria2
+          pip install --break-system-packages pycryptodome
+
+      - name: Setup YAK .bin environment
+        run: |
+          cd YAKit
+          sudo bash .bin/setup-bin-env.sh --no-banner
+
+      - name: Download TGY SAMFW ZIP
+        run: |
+          mkdir -p YAKit/INPUT
+          URL="${{ inputs.tgy_url }}"
+          MODEL="${{ steps.model.outputs.tgy_model }}"
+          if [[ -z "$URL" ]]; then
+            echo "[*] tgy_url 为空, 从 Samsung FUS 拉取 $MODEL TGY 最新固件"
+            OUT=$(python3 YAK-Profiles/Samsung/scripts/fetch_samsung_firmware.py \
+              --model "$MODEL" --region TGY --out-dir YAKit/INPUT)
+            FILENAME=$(basename "$OUT")
+          else
+            FILENAME=$(basename "${URL%%\?*}")
+            [[ "$FILENAME" != *.zip ]] && FILENAME="SAMFW_TGY_${{ inputs.series }}.zip"
+            aria2c -x 8 -s 8 --console-log-level=warn \
+              -d YAKit/INPUT \
+              -o "$FILENAME" \
+              "$URL"
+          fi
+          echo "TGY_FILENAME=$FILENAME" >> "$GITHUB_ENV"
+
+      - name: Extract TGY ROM
+        run: |
+          cd YAKit
+          mkdir -p PROJECTS/tgy/{Config,ROM,Logs,_logical_temp,Build,Extracted}
+          sudo python3 yucca_android_kitchen.py --conf="\
+            ACTION=extract_rom,\
+            ZIP_ROM=$TGY_FILENAME,\
+            EXTRACT_DIR=$GITHUB_WORKSPACE/YAKit/PROJECTS/tgy/Extracted,\
+            PROJECT_NAME=tgy"
+          sudo rm -f "INPUT/$TGY_FILENAME"
+          sudo rm -rf "$GITHUB_WORKSPACE/YAKit/PROJECTS/tgy/Extracted"
+          df -h /
+
+      - name: Extract GPI bundle
+        run: |
+          mkdir -p /tmp/gpi_bundle
+          sudo python3 YAKit/scripts/extract_gpi_from_tgy.py \
+            "YAKit/PROJECTS/tgy/ROM" \
+            "/tmp/gpi_bundle"
+          sudo chown -R $(id -u):$(id -g) /tmp/gpi_bundle
+          echo "[*] GPI bundle 内容:"
+          find /tmp/gpi_bundle -type f
+          sudo rm -rf YAKit/PROJECTS/tgy
+
+      - name: Upload GPI bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpi-bundle-${{ inputs.series }}
+          path: /tmp/gpi_bundle/
+          retention-days: 1
+          if-no-files-found: error

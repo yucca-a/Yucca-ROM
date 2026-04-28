@@ -1,0 +1,401 @@
+name: Build ROM
+
+# 统一 dispatcher: 一个工作流支撑 Xiaomi & Samsung 多 series 多机型
+#
+# 设计要点:
+#   1. 用户选 series (xiaomi17 / s23 / s24 / s25), 默认构建该 series 全部机型
+#   2. 可选 only_device 仅构建该 series 内单一机型
+#   3. setup job 把 series 解析为 brand + 设备 JSON 列表 + 是否需要 TGY 前置
+#   4. Xiaomi 走 _build-xiaomi-device.yml; Samsung 走 _extract-samsung-tgy → _build-samsung-device.yml
+#   5. release job 在所有 build 完成后统一汇总, 按 brand 渲染不同 body
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '构建目标 (品牌 · 系列)'
+        required: true
+        default: 'Xiaomi · 17 系列'
+        type: choice
+        options:
+          - 'Xiaomi · 17 系列'
+          - 'Samsung · Galaxy S23 系列'
+          - 'Samsung · Galaxy S24 系列'
+          - 'Samsung · Galaxy S25 系列'
+      only_device:
+        description: '仅构建该 series 内的单个机型 (留空 = 全 series). 例: popsicle / e3q'
+        required: false
+        type: string
+      skip_ksu:
+        description: '跳过 KernelSU 补丁'
+        required: false
+        default: false
+        type: boolean
+      swap_boot_kernel:
+        description: '[Samsung] 替换 boot.img kernel 为 Kokuban LKM'
+        required: false
+        default: true
+        type: boolean
+      upload_provider:
+        description: '云盘上传'
+        required: false
+        default: 'gofile'
+        type: choice
+        options:
+          - gofile
+          - pixeldrain
+      rom_url:
+        description: '[Xiaomi/only_device] ROM OTA 链接 (留空自动 fetch_ota)'
+        required: false
+        type: string
+      tgy_url:
+        description: '[Samsung] TGY SAMFW ZIP (留空自动 FUS)'
+        required: false
+        type: string
+      chc_url:
+        description: '[Samsung/only_device] CHC SAMFW ZIP (留空自动 FUS)'
+        required: false
+        type: string
+      super_device_size:
+        description: '[Xiaomi/only_device] SUPER_DEVICE_SIZE 覆盖 (留空读 conf)'
+        required: false
+        type: string
+
+jobs:
+  # ═══ 0. 解析 target → brand + series + 设备列表 ═══════════════════════════
+  setup:
+    name: Setup target → matrix
+    if: github.repository == 'yucca-a/Yucca-ROM'
+    runs-on: ubuntu-latest
+    outputs:
+      brand: ${{ steps.s.outputs.brand }}
+      series: ${{ steps.s.outputs.series }}
+      devices: ${{ steps.s.outputs.devices }}
+      needs_tgy: ${{ steps.s.outputs.needs_tgy }}
+      series_label: ${{ steps.s.outputs.series_label }}
+    steps:
+      - id: s
+        env:
+          TARGET: ${{ inputs.target }}
+          OD: ${{ inputs.only_device }}
+        run: |
+          # target 字符串 → (brand, series, devices, needs_tgy, label)
+          # 注意: 选项串里两侧 "·" 由 GHA 直接传入, 用全字符串匹配
+          case "$TARGET" in
+            'Xiaomi · 17 系列')
+              BRAND=xiaomi; SERIES=xiaomi17
+              DEVS='["popsicle","pudding","pandora","nezha"]'
+              TGY=false; LABEL='Xiaomi 17 Series' ;;
+            'Samsung · Galaxy S23 系列')
+              BRAND=samsung; SERIES=s23
+              DEVS='["dm1q","dm2q","dm3q"]'
+              TGY=true;  LABEL='Samsung Galaxy S23 Series' ;;
+            'Samsung · Galaxy S24 系列')
+              BRAND=samsung; SERIES=s24
+              DEVS='["e1q","e2q","e3q"]'
+              TGY=true;  LABEL='Samsung Galaxy S24 Series' ;;
+            'Samsung · Galaxy S25 系列')
+              BRAND=samsung; SERIES=s25
+              DEVS='["pa1q","pa2q","pa3q"]'
+              TGY=true;  LABEL='Samsung Galaxy S25 Series' ;;
+            *) echo "::error::未知 target: $TARGET"; exit 1 ;;
+          esac
+          if [[ -n "$OD" ]]; then
+            DEVS=$(DEVS="$DEVS" python3 -c "import json,os; d=json.loads(os.environ['DEVS']); od=os.environ['OD']; print(json.dumps([x for x in d if x==od]))")
+            if [[ "$DEVS" == "[]" ]]; then
+              echo "::error::only_device='$OD' 不在 target='$TARGET' 的设备列表中"
+              exit 1
+            fi
+          fi
+          {
+            echo "brand=$BRAND"
+            echo "series=$SERIES"
+            echo "devices=$DEVS"
+            echo "needs_tgy=$TGY"
+            echo "series_label=$LABEL"
+          } >> "$GITHUB_OUTPUT"
+          echo "[*] target='$TARGET' → brand=$BRAND series=$SERIES devices=$DEVS needs_tgy=$TGY"
+
+  # ═══ 1. (Samsung only) 提取 GPI bundle from TGY ════════════════════════════
+  extract_tgy:
+    name: Extract Samsung TGY (${{ needs.setup.outputs.series }})
+    needs: setup
+    if: needs.setup.outputs.needs_tgy == 'true'
+    uses: ./.github/workflows/_extract-samsung-tgy.yml
+    with:
+      series: ${{ needs.setup.outputs.series }}
+      tgy_url: ${{ inputs.tgy_url }}
+    secrets: inherit
+
+  # ═══ 2a. 构建 Xiaomi (matrix per device) ══════════════════════════════════
+  build_xiaomi:
+    name: Build ${{ matrix.device }}
+    needs: setup
+    if: needs.setup.outputs.brand == 'xiaomi'
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.setup.outputs.devices) }}
+    uses: ./.github/workflows/_build-xiaomi-device.yml
+    with:
+      device: ${{ matrix.device }}
+      rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
+      super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
+      skip_ksu: ${{ inputs.skip_ksu == true }}
+      upload_provider: ${{ inputs.upload_provider || 'gofile' }}
+      create_release: 'false'
+    secrets: inherit
+
+  # ═══ 2b. 构建 Samsung (matrix per device, needs extract_tgy) ══════════════
+  build_samsung:
+    name: Build ${{ matrix.device }}
+    needs: [setup, extract_tgy]
+    if: needs.setup.outputs.brand == 'samsung'
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.setup.outputs.devices) }}
+    uses: ./.github/workflows/_build-samsung-device.yml
+    with:
+      device: ${{ matrix.device }}
+      chc_url: ${{ inputs.only_device != '' && inputs.chc_url || '' }}
+      gpi_artifact: gpi-bundle-${{ needs.setup.outputs.series }}
+      series: ${{ needs.setup.outputs.series }}
+      skip_ksu: ${{ inputs.skip_ksu == true }}
+      swap_boot_kernel: ${{ inputs.swap_boot_kernel != false }}
+      upload_provider: ${{ inputs.upload_provider || 'gofile' }}
+      create_release: 'false'
+    secrets: inherit
+
+  # ═══ 3. 汇总 Release (按 brand 渲染) ══════════════════════════════════════
+  release:
+    name: Create Release
+    needs: [setup, build_xiaomi, build_samsung]
+    if: ${{ !cancelled() && (needs.build_xiaomi.result == 'success' || needs.build_samsung.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release info artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-info-*
+          merge-multiple: false
+          path: release-infos/
+
+      - name: Download ROM ZIP artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'YuccaROM_*'
+          merge-multiple: true
+          path: zips/
+
+      - name: Filter oversized assets
+        run: |
+          echo "[*] 检查 zips/ 中的文件大小 (GitHub Release 限制 2 GB) ..."
+          for f in zips/*.zip; do
+            [[ ! -f "$f" ]] && continue
+            SIZE=$(stat -c%s "$f")
+            NAME=$(basename "$f")
+            if (( SIZE >= 2147483648 )); then
+              echo "  [~] ${NAME} ($(numfmt --to=iec $SIZE)) 超过 2 GB, 从 assets 中移除"
+              rm -f "$f"
+            else
+              echo "  [✓] ${NAME} ($(numfmt --to=iec $SIZE))"
+            fi
+          done
+
+      - name: Create grouped releases
+        env:
+          BRAND: ${{ needs.setup.outputs.brand }}
+          SERIES: ${{ needs.setup.outputs.series }}
+          SERIES_LABEL: ${{ needs.setup.outputs.series_label }}
+          KSU_PATCHED: ${{ inputs.skip_ksu == true && 'false' || 'true' }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # 按"短版本"分组生成多个 Release.
+          # 短版本规则: 去掉末尾的 ".WXXX..." 区域构建标识 (Xiaomi MIUI/HyperOS 习惯).
+          #   例: OS3.0.306.0.WPBCNXM -> OS3.0.306.0
+          #       OS3.0.303.0.WPACNXM -> OS3.0.303.0  (nezha 落后版本独立成组)
+          #       Samsung 的 PDA (无 .W*) 保持原样, 单组.
+          # 每组:
+          #   xiaomi  -> tag=<short_version>            title=YuccaROM_<short_version>
+          #   samsung -> tag=samsung-<series>-<short_version>  title=YuccaROM_<SERIES>_<short_version>
+          #   assets  -> 仅本组成员设备的 zip
+          mkdir -p /tmp/release
+          python3 - <<'PYEOF'
+          import os, re, json, subprocess, glob, shlex, sys
+          from pathlib import Path
+
+          BRAND        = os.environ['BRAND']
+          SERIES       = os.environ['SERIES']
+          SERIES_LABEL = os.environ['SERIES_LABEL']
+          KSU_REQ      = os.environ['KSU_PATCHED'] == 'true'
+          REPO         = os.environ['GH_REPO']
+
+          def short_ver(v: str) -> str:
+              # 去掉 .Wxxx 区域代码后缀 (xiaomi); samsung 无影响
+              return re.sub(r'\.W[A-Z0-9]+$', '', v)
+
+          def parse_env(p: Path) -> dict:
+              d = {}
+              for line in p.read_text().splitlines():
+                  if '=' in line:
+                      k, _, v = line.partition('=')
+                      d[k.strip()] = v.strip()
+              return d
+
+          def icon(b: str) -> str:
+              return '✅' if b == 'true' else '❌'
+
+          # 1) 收集全部 release-info
+          infos = []
+          for f in sorted(glob.glob('release-infos/*/info.env')):
+              d = parse_env(Path(f))
+              if not d.get('version') or not d.get('codename'):
+                  continue
+              d['short_version'] = short_ver(d['version'])
+              infos.append(d)
+
+          if not infos:
+              print('::error::未获取到任何构建信息', file=sys.stderr)
+              sys.exit(1)
+
+          # 2) 按 short_version 分组
+          groups: dict[str, list[dict]] = {}
+          for d in infos:
+              groups.setdefault(d['short_version'], []).append(d)
+
+          print(f'[*] 共 {len(infos)} 个设备 → {len(groups)} 个 Release 分组')
+          for sv, items in groups.items():
+              print(f'    {sv}: {", ".join(d["codename"] for d in items)}')
+
+          # 3) 每组生成 body + 上传
+          for short_v, items in groups.items():
+              if BRAND == 'samsung':
+                  tag   = f'samsung-{SERIES}-{short_v}'
+                  title = f'YuccaROM_{SERIES.upper()}_{short_v}'
+                  hdr   = '| 设备 | 代号 | 型号 | 链接 |'
+                  sep   = '|------|------|------|------|'
+              else:
+                  tag   = short_v
+                  title = f'YuccaROM_{short_v}'
+                  hdr   = '| 设备 | 代号 | 链接 |'
+                  sep   = '|------|------|------|'
+
+              # 行 + flag (取首项即可, 同一 series 同 build 必相同)
+              first = items[0]
+              avb_i = icon(first.get('remove_avb', 'true'))
+              enc_i = icon(first.get('remove_encrypt', 'true'))
+              dbt_i = icon(first.get('debloat', 'true'))
+              ksu_i = icon('true' if KSU_REQ and first.get('ksu_applied', 'false') == 'true' else 'false')
+
+              rows = []
+              for d in items:
+                  url = d.get('download_url', '')
+                  prov = d.get('upload_provider', '')
+                  if url:
+                      label = {'gofile': 'GoFile', 'pixeldrain': 'PixelDrain'}.get(prov, prov or 'Cloud')
+                      link = f'[{label} ↗]({url})'
+                  else:
+                      link = '见 Assets'
+                  if BRAND == 'samsung':
+                      rows.append(f'| **{d["device_name"]}** | `{d["codename"]}` | `{d.get("model","")}` | {link} |')
+                  else:
+                      rows.append(f'| **{d["device_name"]}** | `{d["codename"]}` | {link} |')
+
+              body = []
+              body.append(f'## YuccaROM ({SERIES_LABEL}) — {short_v}')
+              body.append('')
+              # 显示同组里如果出现混合的完整版本号, 列出来
+              full_versions = sorted({d['version'] for d in items})
+              if len(full_versions) > 1 or full_versions[0] != short_v:
+                  body.append(f'> 本组完整 build: ' + ', '.join(f'`{v}`' for v in full_versions))
+                  body.append('')
+              body.append('| 项目 | 状态 |')
+              body.append('|------|------|')
+              body.append(f'| **去 AVB** | {avb_i} |')
+              body.append(f'| **DATA 解密** | {enc_i} |')
+              body.append(f'| **KernelSU** | {ksu_i} |')
+              body.append('| **Deodex** | ✅ |')
+              body.append(f'| **精简** | {dbt_i} |')
+              body.append('')
+              body.append('### 云盘下载')
+              body.append('')
+              body.append(hdr)
+              body.append(sep)
+              body.extend(rows)
+              body.append('')
+              if BRAND == 'samsung':
+                  body += [
+                      '### 刷入方式 (Odin / Heimdall)', '',
+                      '1. 解压 ZIP, 进入 Download Mode',
+                      '2. Odin 中按槽位放置:',
+                      '   - **AP** → `AP_*_modified.tar.md5`',
+                      '   - **BL** → `BL_*.tar.md5` (原厂未改)',
+                      '   - **CSC** → `HOME_CSC_*_modified.tar.md5` (保留数据)',
+                      '3. 不勾 Auto Reboot, Start', '',
+                      '> ⚠️ 自动构建产物, 自行测试. KernelSU 需安装官方 APK 激活 root.',
+                      '> ⚠️ Knox 永久熔断 (0x1).',
+                  ]
+              else:
+                  body += [
+                      '### 刷入方式', '',
+                      '**线刷 (Fastboot):**',
+                      '1. 解压 ZIP',
+                      '2. 手机进入 fastboot 模式',
+                      '3. 运行 `flash_all.bat` (清除数据) 或 `flash_all_except_storage.bat` (保留数据)',
+                      '',
+                      '**卡刷 (Sideload):**',
+                      '1. 进入 Recovery (TWRP/OrangeFox)',
+                      '2. `adb sideload YuccaROM_xxx.zip`',
+                      '',
+                      '**工具:**',
+                      '- `Tool.bat` — 进入 fastbootd / 安装 KernelSU.apk',
+                      '',
+                      '> ⚠️ 自动构建产物，请自行测试。KernelSU LKM 需安装官方 APK 激活 root。',
+                  ]
+              body_path = Path(f'/tmp/release/body-{short_v}.md')
+              body_path.write_text('\n'.join(body))
+
+              # 收集本组成员的 zip (按 archive_name 精确匹配)
+              wanted = []
+              for d in items:
+                  name = d.get('archive_name')
+                  if not name:
+                      continue
+                  candidate = Path('zips') / name
+                  if candidate.exists():
+                      wanted.append(str(candidate))
+                  else:
+                      print(f'  [~] zip 缺失/已被超大过滤: {name}')
+
+              # 创建/更新 release
+              cmd = ['gh', 'release', 'create', tag,
+                     '--repo', REPO,
+                     '--title', title,
+                     '--notes-file', str(body_path)]
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              if r.returncode != 0:
+                  if 'already exists' in (r.stderr or '') + (r.stdout or ''):
+                      print(f'[~] Release {tag} 已存在, 改为 edit + upload')
+                      subprocess.run(['gh', 'release', 'edit', tag,
+                                      '--repo', REPO,
+                                      '--notes-file', str(body_path)],
+                                     check=True)
+                  else:
+                      print(f'::error::gh release create 失败 (tag={tag}): {r.stderr}')
+                      sys.exit(1)
+              else:
+                  print(f'[✓] Created release {title} (tag={tag})')
+
+              if wanted:
+                  subprocess.run(['gh', 'release', 'upload', tag, *wanted,
+                                  '--repo', REPO, '--clobber'],
+                                 check=True)
+                  print(f'[✓] Uploaded {len(wanted)} asset(s) to {tag}')
+              else:
+                  print(f'[~] tag={tag} 无 zip 可上传 (全被 2GB 过滤或缺失)')
+          PYEOF
