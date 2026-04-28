@@ -163,9 +163,11 @@ jobs:
   build_samsung:
     name: Build ${{ matrix.device }}
     needs: [setup, extract_tgy]
-    # extract_tgy skipped (用户没勾选 extract_gpi_from_tgy) 时仍需运行;
-    # success 也合法; 任一失败状态阻止构建.
+    # GHA 坑: 不写 status function 时默认包 success(), needs 中有 skipped
+    # 会让本 job 也 skipped. 用 !cancelled() 显式覆盖, 再手动判 result.
     if: |
+      !cancelled() &&
+      needs.setup.result == 'success' &&
       needs.setup.outputs.brand == 'samsung' &&
       (needs.extract_tgy.result == 'success' || needs.extract_tgy.result == 'skipped')
     strategy:
