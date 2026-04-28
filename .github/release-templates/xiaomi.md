@@ -8,7 +8,7 @@
 
 **卡刷 (Sideload):**
 1. 进入 Recovery (TWRP/OrangeFox)
-2. 直接点击安装，选择YuccaROM_xxx.zip后滑动滑块进行卡刷，也可使用`adb sideload YuccaROM_xxx.zip`
+2. 直接点击安装，选择`YuccaROM_xxx.zip`后滑动滑块进行卡刷，也可使用`adb sideload YuccaROM_xxx.zip`
 
 **工具:**
 - `Tool.bat` — 进入 fastbootd / 安装 KernelSU.apk
