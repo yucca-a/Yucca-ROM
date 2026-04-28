@@ -364,13 +364,15 @@ jobs:
       # ━━━ 14. KernelSU 补丁 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: KSU patch
         if: steps.config.outputs.ksu_patch == 'true' && inputs.skip_ksu != true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd YAKit
           INPUT="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/${{ steps.config.outputs.ksu_input }}.img"
           OUTPUT="PROJECTS/${{ env.PROJECT }}/Build/${{ steps.config.outputs.ksu_input }}.img"
           if [[ -f "$INPUT" ]]; then
             echo "[*] KernelSU 补丁: ${{ steps.config.outputs.ksu_input }}.img ..."
-            sudo python3 yucca_android_kitchen.py --conf="\
+            sudo -E python3 yucca_android_kitchen.py --conf="\
               ACTION=ksu_patch,\
               INPUT_IMAGE=$INPUT,\
               OUTPUT_IMAGE=$OUTPUT"
