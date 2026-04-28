@@ -18,6 +18,11 @@ on:
         description: 'GPI bundle artifact 名称 (gpi-bundle-s23 / s24 / s25)'
         required: true
         type: string
+      gpi_source:
+        description: 'GPI 来源: artifact (本次 extract_tgy) | release (YAK-Profiles 缓存)'
+        required: false
+        default: 'release'
+        type: string
       series:
         description: '系列 (s23/s24/s25)'
         required: true
@@ -150,12 +155,37 @@ jobs:
           sudo bash .bin/setup-bin-env.sh --no-banner
           echo "[✓] YAK .bin environment ready"
 
-      # ━━━ 5. 下载 GPI Bundle (从 TGY 提取的) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # ━━━ 5. 下载 GPI Bundle (artifact / YAK-Profiles release 二选一) ━━
       - name: Download GPI bundle artifact
+        if: inputs.gpi_source == 'artifact'
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.gpi_artifact }}
           path: /tmp/gpi_bundle/
+
+      - name: Download GPI bundle from YAK-Profiles release
+        if: inputs.gpi_source != 'artifact'
+        env:
+          GH_TOKEN: ${{ secrets.YAKIT_TOKEN }}
+        run: |
+          set -e
+          SERIES="${{ inputs.series }}"
+          mkdir -p /tmp/gpi_bundle
+          # 选最新匹配 'gpi-<series>-*' 的 release tag (按 createdAt 倒序)
+          TAG=$(gh release list --repo "${PROFILES_REPO}" --limit 100 \
+            --json tagName,createdAt \
+            --jq "[.[] | select(.tagName | startswith(\"gpi-${SERIES}-\"))] \
+                  | sort_by(.createdAt) | reverse | .[0].tagName // \"\"")
+          if [[ -z "$TAG" ]]; then
+            echo "::error::YAK-Profiles 没有 gpi-${SERIES}-* 缓存 release. 请重跑并勾选 'extract_gpi_from_tgy'."
+            exit 1
+          fi
+          echo "[*] 使用缓存 GPI release: $TAG"
+          gh release download "$TAG" --repo "${PROFILES_REPO}" \
+            --pattern "gpi-bundle-${SERIES}.tar.gz" \
+            --dir /tmp
+          tar -xzf "/tmp/gpi-bundle-${SERIES}.tar.gz" -C /tmp/gpi_bundle
+          rm -f "/tmp/gpi-bundle-${SERIES}.tar.gz"
 
       - name: Verify GPI bundle
         run: |

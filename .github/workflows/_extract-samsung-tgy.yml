@@ -14,6 +14,15 @@ on:
         description: 'TGY SAMFW ZIP 链接 (留空自动 FUS 拉取)'
         required: false
         type: string
+      publish_release:
+        description: '提取后是否发布 GPI bundle 到 YAK-Profiles release'
+        required: false
+        default: true
+        type: boolean
+    outputs:
+      gpi_release_tag:
+        description: '发布的 GPI release tag (publish_release=true 时)'
+        value: ${{ jobs.extract.outputs.gpi_release_tag }}
 
 env:
   YAKIT_REPO: yucca-a/YAKit
@@ -25,6 +34,8 @@ jobs:
     if: github.repository == 'yucca-a/Yucca-ROM'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    outputs:
+      gpi_release_tag: ${{ steps.publish.outputs.tag }}
     steps:
       - name: Resolve TGY model for series
         id: model
@@ -131,3 +142,38 @@ jobs:
           path: /tmp/gpi_bundle/
           retention-days: 1
           if-no-files-found: error
+
+      # ━━━ 发布到 YAK-Profiles release (新 tag, 不覆盖) ━━━━━━━━━━━━━━━
+      - name: Publish GPI bundle to YAK-Profiles release
+        id: publish
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.YAKIT_TOKEN }}
+          MODEL: ${{ steps.model.outputs.tgy_model }}
+        run: |
+          set -e
+          SERIES="${{ inputs.series }}"
+          TS=$(date -u +%Y%m%d-%H%M%S)
+          TAG="gpi-${SERIES}-${TS}-${GITHUB_RUN_ID}"
+          TITLE="GPI Bundle ${SERIES^^} (${MODEL}) ${TS}"
+          BUNDLE=/tmp/gpi-bundle-${SERIES}.tar.gz
+          tar -czf "$BUNDLE" -C /tmp/gpi_bundle .
+          ls -lh "$BUNDLE"
+          NOTES=$(cat <<EOF
+          Auto-generated GPI bundle extracted from TGY firmware.
+
+          - Series: ${SERIES^^}
+          - TGY Model: ${MODEL}
+          - Source run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Generated: ${TS} UTC
+
+          File: \`gpi-bundle-${SERIES}.tar.gz\` (extract: \`tar -xzf gpi-bundle-${SERIES}.tar.gz\`)
+          EOF
+          )
+          gh release create "$TAG" \
+            --repo "${PROFILES_REPO}" \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            "$BUNDLE#gpi-bundle-${SERIES}.tar.gz"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "[✓] 已发布 $TAG → ${PROFILES_REPO}"

@@ -39,6 +39,11 @@ on:
         required: false
         default: true
         type: boolean
+      extract_gpi_from_tgy:
+        description: '[Samsung] 从最新 TGY 提取 GPI (耗时, 否则用 YAK-Profiles 缓存 release)'
+        required: false
+        default: false
+        type: boolean
       upload_provider:
         description: '云盘上传'
         required: false
@@ -120,14 +125,19 @@ jobs:
           echo "[*] target='$TARGET' → brand=$BRAND series=$SERIES devices=$DEVS needs_tgy=$TGY"
 
   # ═══ 1. (Samsung only) 提取 GPI bundle from TGY ════════════════════════════
+  # 仅在用户勾选 extract_gpi_from_tgy 时运行. 提取产物会:
+  #   - 作 artifact 传给 build_samsung (本次构建)
+  #   - 推到 YAK-Profiles release (tag=gpi-<series>-<ts>-<run_id>, 永不覆盖)
+  # 未勾选时直接跳过, build_samsung 会改去 YAK-Profiles release 拉最新缓存.
   extract_tgy:
     name: Extract Samsung TGY (${{ needs.setup.outputs.series }})
     needs: setup
-    if: needs.setup.outputs.needs_tgy == 'true'
+    if: needs.setup.outputs.needs_tgy == 'true' && inputs.extract_gpi_from_tgy == true
     uses: ./.github/workflows/_extract-samsung-tgy.yml
     with:
       series: ${{ needs.setup.outputs.series }}
       tgy_url: ${{ inputs.tgy_url }}
+      publish_release: true
     secrets: inherit
 
   # ═══ 2a. 构建 Xiaomi (matrix per device) ══════════════════════════════════
@@ -153,7 +163,11 @@ jobs:
   build_samsung:
     name: Build ${{ matrix.device }}
     needs: [setup, extract_tgy]
-    if: needs.setup.outputs.brand == 'samsung'
+    # extract_tgy skipped (用户没勾选 extract_gpi_from_tgy) 时仍需运行;
+    # success 也合法; 任一失败状态阻止构建.
+    if: |
+      needs.setup.outputs.brand == 'samsung' &&
+      (needs.extract_tgy.result == 'success' || needs.extract_tgy.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +176,7 @@ jobs:
     with:
       device: ${{ matrix.device }}
       chc_url: ${{ inputs.only_device != '' && inputs.chc_url || '' }}
+      gpi_source: ${{ inputs.extract_gpi_from_tgy == true && 'artifact' || 'release' }}
       gpi_artifact: gpi-bundle-${{ needs.setup.outputs.series }}
       series: ${{ needs.setup.outputs.series }}
       skip_ksu: ${{ inputs.skip_ksu == true }}
