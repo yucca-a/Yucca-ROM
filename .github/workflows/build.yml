@@ -177,6 +177,13 @@ jobs:
     if: ${{ !cancelled() && (needs.build_xiaomi.result == 'success' || needs.build_samsung.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (release templates)
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/release-templates
+          sparse-checkout-cone-mode: false
+
       - name: Download release info artifacts
         uses: actions/download-artifact@v4
         with:
@@ -341,22 +348,13 @@ jobs:
                       '> ⚠️ Knox 永久熔断 (0x1).',
                   ]
               else:
-                  body += [
-                      '### 刷入方式', '',
-                      '**线刷 (Fastboot):**',
-                      '1. 解压 ZIP',
-                      '2. 手机进入 fastboot 模式',
-                      '3. 运行 `flash_all.bat` (清除数据) 或 `flash_all_except_storage.bat` (保留数据)',
-                      '',
-                      '**卡刷 (Sideload):**',
-                      '1. 进入 Recovery (TWRP/OrangeFox)',
-                      '2. `adb sideload YuccaROM_xxx.zip`',
-                      '',
-                      '**工具:**',
-                      '- `Tool.bat` — 进入 fastbootd / 安装 KernelSU.apk',
-                      '',
-                      '> ⚠️ 自动构建产物，请自行测试。KernelSU LKM 需安装官方 APK 激活 root。',
-                  ]
+                  # 小米 ROM 刷机说明从 .github/release-templates/xiaomi.md 加载
+                  # 后续要改文档直接编辑该 markdown 文件, 无需改 workflow.
+                  tpl = Path('.github/release-templates/xiaomi.md')
+                  if tpl.is_file():
+                      body.append(tpl.read_text().rstrip())
+                  else:
+                      print(f'::warning::缺失模板 {tpl}, 跳过刷入说明段')
               body_path = Path(f'/tmp/release/body-{short_v}.md')
               body_path.write_text('\n'.join(body))
 
