@@ -305,8 +305,18 @@ jobs:
         run: |
           cd YAKit
           rm -f "INPUT/${{ steps.rom.outputs.filename }}"
+          # 在删 super.img 前记录其物理大小 = PIT 里 super 分区大小,
+          # 重打包时必须精确匹配, 否则 Odin 写 super 立刻 fail.
+          SUPER_IMG="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
+          if [[ -f "$SUPER_IMG" ]]; then
+            ORIG_SUPER_SIZE=$(stat -c%s "$SUPER_IMG")
+            echo "[*] 原厂 super.img 大小 = $ORIG_SUPER_SIZE bytes"
+            echo "ORIG_SUPER_SIZE=$ORIG_SUPER_SIZE" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Extracted/super.img 不存在, 无法记录原始大小"
+          fi
           # super.img 已被 extract_rom 拆为 ROM/{system,product,vendor,...}
-          rm -f "$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
+          rm -f "$SUPER_IMG"
           df -h /
 
       # ━━━ 11. 修复脚本 (fixes/) — 含 GPI 注入 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -422,14 +432,35 @@ jobs:
 
       # ━━━ 17. Super 重打包 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Repack super.img
+        env:
+          # 三星 Odin 写 super 时, 镜像大小必须精确 = PIT 中 super 分区大小,
+          # 即官方 SAMFW 解包后的 super.img 大小. 否则 Odin 立刻 fail.
+          # YAKit 默认走 group_max+overhead 向上对齐 0.5 GiB, 一般会偏大.
+          YAK_SUPER_DEVICE_SIZE: ${{ env.ORIG_SUPER_SIZE }}
         run: |
           cd YAKit
+          # 同时改写 super_repack_info.txt 中的 SUPER_DEVICE_SIZE
+          # (env 变量在 extract_rom 阶段才生效, 此处 super_repack 走的是
+          # 已经写好的 info 文件, 必须就地覆盖)
+          INFO="PROJECTS/${{ env.PROJECT }}/Config/super_repack_info.txt"
+          if [[ -n "$YAK_SUPER_DEVICE_SIZE" && -f "$INFO" ]]; then
+            echo "[*] 强制 SUPER_DEVICE_SIZE = $YAK_SUPER_DEVICE_SIZE (= 原厂 super.img 大小)"
+            sed -i -E "s/^SUPER_DEVICE_SIZE=.*/SUPER_DEVICE_SIZE=${YAK_SUPER_DEVICE_SIZE}/" "$INFO"
+            grep '^SUPER_DEVICE_SIZE=' "$INFO"
+          fi
           echo "[*] 重打包 super.img ..."
-          sudo python3 yucca_android_kitchen.py --conf="\
+          sudo -E python3 yucca_android_kitchen.py --conf="\
             ACTION=super_repack,\
             PROJECT_NAME=${{ env.PROJECT }},\
             OUTPUT_IMAGE=PROJECTS/${{ env.PROJECT }}/Build/super.img,\
             VBMETA_DIR=$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
+          # 校验生成大小 = 原厂大小
+          BUILT_SIZE=$(stat -c%s "PROJECTS/${{ env.PROJECT }}/Build/super.img")
+          echo "[*] 生成 super.img: $BUILT_SIZE bytes (期望 $YAK_SUPER_DEVICE_SIZE)"
+          if [[ -n "$YAK_SUPER_DEVICE_SIZE" && "$BUILT_SIZE" != "$YAK_SUPER_DEVICE_SIZE" ]]; then
+            echo "::error::super.img 大小 ($BUILT_SIZE) 与原厂 PIT super 分区大小 ($YAK_SUPER_DEVICE_SIZE) 不一致, Odin 会 fail"
+            exit 1
+          fi
           echo "[✓] super.img 重打包完成"
           ls -lh "PROJECTS/${{ env.PROJECT }}/Build/"
 
