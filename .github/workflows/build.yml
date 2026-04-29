@@ -263,6 +263,16 @@ jobs:
               # 去掉 .Wxxx 区域代码后缀 (xiaomi); samsung 无影响
               return re.sub(r'\.W[A-Z0-9]+$', '', v)
 
+          def mask_pda(v: str) -> str:
+              # 三星 PDA 第 4 位 (0-index 3) 是机型代号:
+              #   S91[1/6/8] = S23/S23+/S23 Ultra → 屏蔽为 S91X
+              #   S92[1/6/8] = S24/S24+/S24 Ultra → 屏蔽为 S92X
+              #   S93[1/6/8] = S25/S25+/S25 Ultra → 屏蔽为 S93X
+              # 用于把同系列 3 个机型聚合到一个 release tag
+              if len(v) >= 4 and v.startswith('S') and v[1:3].isdigit():
+                  return v[:3] + 'X' + v[4:]
+              return v
+
           def parse_env(p: Path) -> dict:
               d = {}
               for line in p.read_text().splitlines():
@@ -281,16 +291,21 @@ jobs:
               if not d.get('version') or not d.get('codename'):
                   continue
               d['short_version'] = short_ver(d['version'])
+              # samsung 用屏蔽后的 PDA 作为分组键, 让同系列 3 机型进同一 release
+              if BRAND == 'samsung':
+                  d['group_key'] = mask_pda(d['short_version'])
+              else:
+                  d['group_key'] = d['short_version']
               infos.append(d)
 
           if not infos:
               print('::error::未获取到任何构建信息', file=sys.stderr)
               sys.exit(1)
 
-          # 2) 按 short_version 分组
+          # 2) 按 group_key 分组
           groups: dict[str, list[dict]] = {}
           for d in infos:
-              groups.setdefault(d['short_version'], []).append(d)
+              groups.setdefault(d['group_key'], []).append(d)
 
           print(f'[*] 共 {len(infos)} 个设备 → {len(groups)} 个 Release 分组')
           for sv, items in groups.items():
@@ -299,8 +314,8 @@ jobs:
           # 3) 每组生成 body + 上传
           for short_v, items in groups.items():
               if BRAND == 'samsung':
-                  tag   = f'samsung-{SERIES}-{short_v}'
-                  title = f'YuccaROM_{SERIES.upper()}_{short_v}'
+                  tag   = f'YuccaROM_{short_v}'
+                  title = f'YuccaROM ({SERIES_LABEL}) — {short_v}'
                   hdr   = '| 设备 | 代号 | 型号 | 链接 |'
                   sep   = '|------|------|------|------|'
               else:
