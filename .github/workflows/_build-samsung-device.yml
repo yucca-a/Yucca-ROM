@@ -525,12 +525,34 @@ jobs:
             PIT_ARG="--pit-file ${{ steps.pit.outputs.pit_file }}"
           fi
           mkdir -p /tmp/samsung_out
+          # 从官方 SAMFW ZIP 内的 AP_*.tar.md5 提取 PDA 段
+          # 命名例: AP_S9180ZCS7EZC1_S9180ZCS7EZC1_MQB...tar.md5 → PDA = S9180ZCS7EZC1
+          AP_INNER=$(ZIP="/tmp/samfw_orig/${{ steps.rom.outputs.filename }}" python3 - <<'PY'
+          import zipfile, os
+          z = zipfile.ZipFile(os.environ['ZIP'])
+          for n in z.namelist():
+              bn = os.path.basename(n)
+              if bn.upper().startswith('AP_') and (bn.endswith('.tar.md5') or bn.endswith('.tar')):
+                  print(bn); break
+          PY
+          )
+          PDA=$(echo "$AP_INNER" | sed -E 's/^AP_([A-Z0-9]+)_.*/\1/')
+          if [[ -z "$PDA" || "$PDA" == "$AP_INNER" ]]; then
+            echo "::warning::从 $AP_INNER 提取 PDA 失败, 回退 timestamp"
+            PDA="$(date +%Y%m%d)"
+          fi
+          echo "[*] PDA: $PDA"
+          echo "pda=$PDA" >> "$GITHUB_OUTPUT"
+          AP_NAME="AP_${PDA}_By.Yucca"
+          CSC_NAME="CSC_${PDA}_By.Yucca"
           python3 scripts/samfw_repack.py \
             --samfw-zip "/tmp/samfw_orig/${{ steps.rom.outputs.filename }}" \
             --build-dir "$BUILD" \
             $PIT_ARG \
             --out-dir /tmp/samsung_out \
-            --lz4-level 9
+            --lz4-level 9 \
+            --ap-out-name "$AP_NAME" \
+            --csc-out-name "$CSC_NAME"
           echo "--- /tmp/samsung_out/ ---"
           ls -lh /tmp/samsung_out/
           # 删除原始 SAMFW ZIP 释放空间
@@ -542,49 +564,20 @@ jobs:
       - name: Package Odin flashable ZIP
         id: package
         run: |
-          CODENAME="${{ steps.config.outputs.codename }}"
-          MODEL="${{ steps.config.outputs.model }}"
+          PDA="${{ steps.samfw.outputs.pda }}"
           VERSION="${{ steps.rom.outputs.version }}"
-          TIMESTAMP=$(date +%Y%m%d)
-          OUTPUT_NAME="YuccaROM_${CODENAME}_${MODEL}_${VERSION}_${TIMESTAMP}"
+          OUTPUT_NAME="${PDA}_By.Yucca"
           echo "[*] 打包 ${OUTPUT_NAME}.zip ..."
-          # 添加 README
-          cat > /tmp/samsung_out/README.txt << EOF
-          YuccaROM for ${{ steps.config.outputs.device_name }} (${MODEL} / ${CODENAME})
-          Version: ${VERSION}
-          Built:   $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-          === 刷入方式 (Odin) ===
-          1. 手机进入 Download Mode (音量下 + Bixby + 电源, 接上数据线)
-          2. 打开 Odin (Windows) 或 Heimdall (Linux/macOS)
-          3. 按以下槽位放置:
-             AP   → AP_${MODEL}_*_modified.tar.md5
-             BL   → BL_${MODEL}_*.tar.md5         (原厂未改, 可不刷)
-             CSC  → HOME_CSC_${MODEL}_*_modified.tar.md5  (保留数据)
-                    或 CSC_*.tar.md5 (清除数据, 含原厂 .pit)
-          4. 选项: 取消 "Auto Reboot" + "F. Reset Time" (首次刷可勾)
-          5. Start
-
-          === 已应用修改 ===
-          - 去 AVB (vbmeta flags=3)
-          - 去强制加密
-          - KernelSU LKM (init_boot.img)
-          - Deodex (移除预编译 oat/vdex)
-          - 精简 (移除 Bixby/SamsungAccount/Galaxy 商店等)
-          - GMS 三件套注入 (GooglePackageInstaller / GooglePlayServices)
-          - 修复中国版 Google 服务限制
-          - SBrowser 转预装可卸载
-          - 添加 CMFA (Magisk 的 Manager)
-          - build.prop: ro.build.display.id 后缀 By_Yucca
-
-          === 注意 ===
-          ⚠️ 自动构建产物, 自行测试, 出现任何问题概不负责
-          ⚠️ KernelSU 需在系统中安装官方 APK 激活 root
-          ⚠️ 三星机器刷修改包后 Knox 永久熔断 (0x1)
-          EOF
-
+          # 只打包 AP + CSC 两个文件 (无 README/BL/CP)
           cd /tmp/samsung_out
-          zip -r -1 "/tmp/${OUTPUT_NAME}.zip" . -x "*.DS_Store"
+          AP_FILE="AP_${PDA}_By.Yucca"
+          CSC_FILE="CSC_${PDA}_By.Yucca"
+          if [[ ! -f "$AP_FILE" || ! -f "$CSC_FILE" ]]; then
+            echo "::error::AP/CSC 产物缺失 (AP=$AP_FILE CSC=$CSC_FILE)"
+            ls -la
+            exit 1
+          fi
+          zip -j -1 "/tmp/${OUTPUT_NAME}.zip" "$AP_FILE" "$CSC_FILE"
           ARCHIVE="/tmp/${OUTPUT_NAME}.zip"
           ARCHIVE_SIZE=$(stat -c%s "$ARCHIVE" | numfmt --to=iec)
           {
@@ -593,6 +586,7 @@ jobs:
             echo "version=$VERSION"
           } >> "$GITHUB_OUTPUT"
           echo "[✓] 产物: ${OUTPUT_NAME}.zip ($ARCHIVE_SIZE)"
+          unzip -l "$ARCHIVE"
 
       # ━━━ 23. 上传到云盘 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Upload to cloud
