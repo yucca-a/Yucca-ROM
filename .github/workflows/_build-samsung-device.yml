@@ -305,12 +305,27 @@ jobs:
         run: |
           cd YAKit
           rm -f "INPUT/${{ steps.rom.outputs.filename }}"
-          # 在删 super.img 前记录其物理大小 = PIT 里 super 分区大小,
-          # 重打包时必须精确匹配, 否则 Odin 写 super 立刻 fail.
+          # 在删 super.img 前记录其 *逻辑* 大小 = PIT 里 super 分区大小.
+          # 注意: 不能用 stat 拿物理大小 — 原厂 super.img 是 sparse 格式,
+          # sparse 的物理字节数 (chunk header + 非零数据) 跟逻辑分区大小无关,
+          # 而且重打包后 chunk 布局会变, 物理大小一定不同 → 严格相等检查永远 fail.
+          # Odin/PIT 看的是逻辑(unsparse) 大小, 即 sparse header 的 total_blks*blk_sz.
           SUPER_IMG="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
           if [[ -f "$SUPER_IMG" ]]; then
-            ORIG_SUPER_SIZE=$(stat -c%s "$SUPER_IMG")
-            echo "[*] 原厂 super.img 大小 = $ORIG_SUPER_SIZE bytes"
+            ORIG_SUPER_SIZE=$(python3 -c "
+          import struct, os
+          p = '$SUPER_IMG'
+          with open(p, 'rb') as f:
+              h = f.read(28)
+          if len(h) >= 4 and h[:4] == b'\x3a\xff\x26\xed':
+              # Android sparse header: magic, major, minor, file_hdr_sz, chunk_hdr_sz,
+              # blk_sz, total_blks, total_chunks, image_checksum
+              _, _, _, _, _, blksz, total_blks, *_ = struct.unpack('<I4H4I', h)
+              print(blksz * total_blks)
+          else:
+              print(os.path.getsize(p))
+          ")
+            echo "[*] 原厂 super.img 逻辑大小 = $ORIG_SUPER_SIZE bytes"
             echo "ORIG_SUPER_SIZE=$ORIG_SUPER_SIZE" >> "$GITHUB_ENV"
           else
             echo "::warning::Extracted/super.img 不存在, 无法记录原始大小"
@@ -454,11 +469,24 @@ jobs:
             PROJECT_NAME=${{ env.PROJECT }},\
             OUTPUT_IMAGE=PROJECTS/${{ env.PROJECT }}/Build/super.img,\
             VBMETA_DIR=$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted"
-          # 校验生成大小 = 原厂大小
-          BUILT_SIZE=$(stat -c%s "PROJECTS/${{ env.PROJECT }}/Build/super.img")
-          echo "[*] 生成 super.img: $BUILT_SIZE bytes (期望 $YAK_SUPER_DEVICE_SIZE)"
+          # 校验生成的 *逻辑* 大小 = 原厂逻辑大小 (= PIT super 分区大小).
+          # 必须解 sparse header, 否则物理字节数会因为 chunk 重排而对不上.
+          BUILT_IMG="PROJECTS/${{ env.PROJECT }}/Build/super.img"
+          BUILT_SIZE=$(python3 -c "
+          import struct, os
+          p = '$BUILT_IMG'
+          with open(p, 'rb') as f:
+              h = f.read(28)
+          if len(h) >= 4 and h[:4] == b'\x3a\xff\x26\xed':
+              _, _, _, _, _, blksz, total_blks, *_ = struct.unpack('<I4H4I', h)
+              print(blksz * total_blks)
+          else:
+              print(os.path.getsize(p))
+          ")
+          PHYS_SIZE=$(stat -c%s "$BUILT_IMG")
+          echo "[*] 生成 super.img: 物理 $PHYS_SIZE bytes / 逻辑 $BUILT_SIZE bytes (期望 $YAK_SUPER_DEVICE_SIZE)"
           if [[ -n "$YAK_SUPER_DEVICE_SIZE" && "$BUILT_SIZE" != "$YAK_SUPER_DEVICE_SIZE" ]]; then
-            echo "::error::super.img 大小 ($BUILT_SIZE) 与原厂 PIT super 分区大小 ($YAK_SUPER_DEVICE_SIZE) 不一致, Odin 会 fail"
+            echo "::error::super.img 逻辑大小 ($BUILT_SIZE) 与原厂 PIT super 分区大小 ($YAK_SUPER_DEVICE_SIZE) 不一致, Odin 会 fail"
             exit 1
           fi
           echo "[✓] super.img 重打包完成"
