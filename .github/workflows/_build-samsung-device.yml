@@ -574,8 +574,8 @@ jobs:
           fi
           echo "[*] PDA: $PDA"
           echo "pda=$PDA" >> "$GITHUB_OUTPUT"
-          AP_NAME="AP_${PDA}_By.Yucca"
-          CSC_NAME="CSC_${PDA}_By.Yucca"
+          AP_NAME="AP_${PDA}_By.Yucca.tar"
+          CSC_NAME="CSC_${PDA}_By.Yucca.tar"
           python3 scripts/samfw_repack.py \
             --samfw-zip "/tmp/samfw_orig/${{ steps.rom.outputs.filename }}" \
             --build-dir "$BUILD" \
@@ -601,8 +601,8 @@ jobs:
           echo "[*] 打包 ${OUTPUT_NAME}.zip ..."
           # 只打包 AP + CSC 两个文件 (无 README/BL/CP)
           cd /tmp/samsung_out
-          AP_FILE="AP_${PDA}_By.Yucca"
-          CSC_FILE="CSC_${PDA}_By.Yucca"
+          AP_FILE="AP_${PDA}_By.Yucca.tar"
+          CSC_FILE="CSC_${PDA}_By.Yucca.tar"
           if [[ ! -f "$AP_FILE" || ! -f "$CSC_FILE" ]]; then
             echo "::error::AP/CSC 产物缺失 (AP=$AP_FILE CSC=$CSC_FILE)"
             ls -la
