@@ -300,38 +300,60 @@ jobs:
                       g.write('pit_file=\n')
           PY
 
-      # ━━━ 10. 清理 INPUT + 释放空间 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # ━━━ 10. 清理 INPUT + 从原始 super.img.lz4 读 super 分区大小 ━━━━━━━
       - name: Cleanup INPUT
         run: |
           cd YAKit
           rm -f "INPUT/${{ steps.rom.outputs.filename }}"
-          # 在删 super.img 前记录其 *逻辑* 大小 = PIT 里 super 分区大小.
-          # 注意: 不能用 stat 拿物理大小 — 原厂 super.img 是 sparse 格式,
-          # sparse 的物理字节数 (chunk header + 非零数据) 跟逻辑分区大小无关,
-          # 而且重打包后 chunk 布局会变, 物理大小一定不同 → 严格相等检查永远 fail.
-          # Odin/PIT 看的是逻辑(unsparse) 大小, 即 sparse header 的 total_blks*blk_sz.
-          SUPER_IMG="$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
-          if [[ -f "$SUPER_IMG" ]]; then
-            ORIG_SUPER_SIZE=$(python3 -c "
-          import struct, os
-          p = '$SUPER_IMG'
-          with open(p, 'rb') as f:
-              h = f.read(28)
-          if len(h) >= 4 and h[:4] == b'\x3a\xff\x26\xed':
-              # Android sparse header: magic, major, minor, file_hdr_sz, chunk_hdr_sz,
-              # blk_sz, total_blks, total_chunks, image_checksum
-              _, _, _, _, _, blksz, total_blks, *_ = struct.unpack('<I4H4I', h)
-              print(blksz * total_blks)
-          else:
-              print(os.path.getsize(p))
-          ")
-            echo "[*] 原厂 super.img 逻辑大小 = $ORIG_SUPER_SIZE bytes"
-            echo "ORIG_SUPER_SIZE=$ORIG_SUPER_SIZE" >> "$GITHUB_ENV"
-          else
-            echo "::warning::Extracted/super.img 不存在, 无法记录原始大小"
+          # 从原始 SAMFW 包里的 super.img.lz4 读 sparse header, 计算逻辑大小
+          # (= Odin/PIT 期望的 super 分区字节数). 不靠 PIT, 因为 Samsung PIT
+          # 的 blocknum 字段单位在不同机型上 512B / 4096B 都见过, 难以可靠判定.
+          # 原始 super.img.lz4 的 sparse header 是绝对真理 — 那台机器本来
+          # 就是用它刷的, 我们只要复现这个逻辑大小就行.
+          ZIP="/tmp/samfw_orig/${{ steps.rom.outputs.filename }}"
+          if [[ ! -f "$ZIP" ]]; then
+            echo "::error::原始 SAMFW zip 不存在: $ZIP"
+            exit 1
           fi
+          ORIG_SUPER_SIZE=$(python3 -c "
+          import zipfile, tarfile, struct, subprocess, sys
+          zip_path = '$ZIP'
+          with zipfile.ZipFile(zip_path) as z:
+              ap = next((n for n in z.namelist()
+                         if n.startswith('AP_') and n.endswith('.tar.md5')), None)
+              if not ap:
+                  sys.stderr.write('AP_*.tar.md5 not found in zip\n'); sys.exit(1)
+              with z.open(ap) as zf, tarfile.open(fileobj=zf, mode='r|') as tf:
+                  for m in tf:
+                      if m.isfile() and m.name.endswith('super.img.lz4'):
+                          src = tf.extractfile(m)
+                          # 流式解压前 1 MiB 已远超 sparse header (28B), 取头 28B
+                          p = subprocess.Popen(['lz4', '-dc', '-'],
+                                               stdin=subprocess.PIPE,
+                                               stdout=subprocess.PIPE)
+                          # 灌入足够数据, 再关 stdin 让 lz4 输出残留
+                          p.stdin.write(src.read(1024*1024))
+                          p.stdin.close()
+                          h = p.stdout.read(28)
+                          p.kill()
+                          if h[:4] != b'\x3a\xff\x26\xed':
+                              sys.stderr.write('super.img is not Android sparse\n')
+                              sys.exit(2)
+                          (_magic, _maj, _min, _fhsz, _chsz,
+                           blksz, total_blks, _tc, _crc) = struct.unpack('<I4H4I', h)
+                          print(blksz * total_blks)
+                          sys.exit(0)
+                  sys.stderr.write('super.img.lz4 not found in AP tar\n')
+                  sys.exit(3)
+          ")
+          if [[ -z "$ORIG_SUPER_SIZE" ]]; then
+            echo "::error::无法从原始 super.img.lz4 解析 sparse 逻辑大小"
+            exit 1
+          fi
+          echo "[*] 原厂 super 分区大小 (sparse logical) = $ORIG_SUPER_SIZE bytes ($((ORIG_SUPER_SIZE / 1024 / 1024)) MiB)"
+          echo "ORIG_SUPER_SIZE=$ORIG_SUPER_SIZE" >> "$GITHUB_ENV"
           # super.img 已被 extract_rom 拆为 ROM/{system,product,vendor,...}
-          rm -f "$SUPER_IMG"
+          rm -f "$GITHUB_WORKSPACE/YAKit/PROJECTS/${{ env.PROJECT }}/Extracted/super.img"
           df -h /
 
       # ━━━ 11. 修复脚本 (fixes/) — 含 GPI 注入 ━━━━━━━━━━━━━━━━━━━━━━━━
