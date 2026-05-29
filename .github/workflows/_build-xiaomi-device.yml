@@ -469,6 +469,8 @@ jobs:
       # ━━━ 20. 打包刷机包 (线刷 + 卡刷一体 ZIP) ━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Package flashable ZIP
         id: package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd YAKit
           BUILD="PROJECTS/${{ env.PROJECT }}/Build"
@@ -480,15 +482,44 @@ jobs:
           rm -rf "$PKG"
           mkdir -p "$PKG/images" "$PKG/META-INF/com/google/android"
 
+          # ── GitHub API helper: 带鉴权 + 重试 ──
+          # 未鉴权 api.github.com 限流 60/h/IP; 多机型并行 + 每个 job 多次调用易触限,
+          # 限流时返回的 JSON 无 tag_name → grep 空 → pipefail+set -e 让整步 exit 1.
+          # 用 GITHUB_TOKEN 鉴权 (5000/h) 并重试, 彻底消除这一偶发失败.
+          GH_AUTH=()
+          [[ -n "${GH_TOKEN:-}" ]] && GH_AUTH=(-H "Authorization: Bearer $GH_TOKEN")
+          gh_api() {
+            local url="$1" out i
+            for i in 1 2 3 4 5; do
+              out=$(curl -fsSL -H "Accept: application/vnd.github+json" "${GH_AUTH[@]}" "$url") \
+                && { printf '%s' "$out"; return 0; }
+              echo "  [~] GitHub API 第 $i 次失败, 重试: $url" >&2
+              sleep $((i * 3))
+            done
+            return 1
+          }
+
+          # ── 解析 facebook/zstd 最新版本 (只取一次, arm64 与 win64 复用) ──
+          echo "[*] 查询 zstd 最新版本 ..."
+          ZSTD_VER=$(gh_api "https://api.github.com/repos/facebook/zstd/releases/latest" \
+            | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1) || true
+          if [[ -z "$ZSTD_VER" ]]; then
+            echo "::error::无法获取 zstd 最新版本 (GitHub API 限流或网络故障)"
+            exit 1
+          fi
+          echo "  zstd = v${ZSTD_VER}"
+
           # ── 交叉编译 arm64 静态 zstd (供 Recovery 卡刷使用) ──
           echo "[*] 编译 arm64 静态 zstd ..."
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu >/dev/null 2>&1
-          ZSTD_VER=$(curl -sL "https://api.github.com/repos/facebook/zstd/releases/latest" \
-            | grep -oP '"tag_name":\s*"v?\K[^"]+')
-          curl -sL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz" \
+          curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-${ZSTD_VER}.tar.gz" \
             | tar xz -C /tmp
-          make -j$(nproc) -C "/tmp/zstd-${ZSTD_VER}/programs" zstd \
-            CC=aarch64-linux-gnu-gcc LDFLAGS="-static" >/dev/null 2>&1
+          make -j"$(nproc)" -C "/tmp/zstd-${ZSTD_VER}/programs" zstd \
+            CC=aarch64-linux-gnu-gcc LDFLAGS="-static" >/dev/null
+          if [[ ! -x "/tmp/zstd-${ZSTD_VER}/programs/zstd" ]]; then
+            echo "::error::arm64 静态 zstd 编译失败 (未生成可执行文件)"
+            exit 1
+          fi
           cp "/tmp/zstd-${ZSTD_VER}/programs/zstd" "$PKG/META-INF/zstd_arm64"
           chmod 755 "$PKG/META-INF/zstd_arm64"
           echo "  zstd_arm64 (v${ZSTD_VER}) → META-INF/"
@@ -543,11 +574,9 @@ jobs:
           rm -f /tmp/platform-tools.zip
           echo "  adb.exe + fastboot.exe"
 
-          # ── 下载 zstd Windows 版 ──
-          echo "[*] 下载 zstd.exe ..."
-          ZSTD_VER=$(curl -sL "https://api.github.com/repos/facebook/zstd/releases/latest" \
-            | grep -oP '"tag_name":\s*"v?\K[^"]+')
-          curl -sL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-v${ZSTD_VER}-win64.zip" \
+          # ── 下载 zstd Windows 版 (复用上面解析的 ZSTD_VER) ──
+          echo "[*] 下载 zstd.exe (v${ZSTD_VER}) ..."
+          curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VER}/zstd-v${ZSTD_VER}-win64.zip" \
             -o /tmp/zstd.zip
           unzip -joq /tmp/zstd.zip "*/zstd.exe" -d "$PKG/"
           rm -f /tmp/zstd.zip
@@ -555,8 +584,8 @@ jobs:
 
           # ── 下载 KernelSU.apk ──
           echo "[*] 下载 KernelSU.apk ..."
-          KSU_URL=$(curl -sL "https://api.github.com/repos/tiann/KernelSU/releases/latest" \
-            | grep -oP '"browser_download_url":\s*"\K[^"]*\.apk' | head -1)
+          KSU_URL=$(gh_api "https://api.github.com/repos/tiann/KernelSU/releases/latest" \
+            | grep -oP '"browser_download_url":\s*"\K[^"]*\.apk' | head -1) || true
           if [[ -n "$KSU_URL" ]]; then
             curl -sL "$KSU_URL" -o "$PKG/KernelSU.apk"
             echo "  KernelSU.apk"
