@@ -154,6 +154,7 @@ jobs:
             ROM_URL="${{ inputs.rom_url }}"
             FILENAME=$(basename "$ROM_URL" | sed 's/?.*//')
             VERSION=$(echo "$FILENAME" | grep -oP 'OS[\d.]+\.\w+' || echo "custom")
+            MIRRORS="$ROM_URL"
           else
             OUTPUT=$(python3 YAKit/scripts/fetch_ota.py \
               --codename "${{ steps.config.outputs.codename }}" \
@@ -163,11 +164,15 @@ jobs:
             ROM_URL=$(echo "$OUTPUT" | sed -n '1p')
             VERSION=$(echo "$OUTPUT" | sed -n '2p')
             FILENAME=$(echo "$OUTPUT" | sed -n '3p')
+            # 行4 = 全部镜像 (空格分隔); 旧版脚本无此行时回退到主 URL
+            MIRRORS=$(echo "$OUTPUT" | sed -n '4p')
+            [[ -z "$MIRRORS" ]] && MIRRORS="$ROM_URL"
           fi
           {
             echo "url=$ROM_URL"
             echo "version=$VERSION"
             echo "filename=$FILENAME"
+            echo "mirrors=$MIRRORS"
           } >> "$GITHUB_OUTPUT"
           echo "[*] ROM: $VERSION — $FILENAME"
 
@@ -175,10 +180,13 @@ jobs:
       - name: Download ROM
         run: |
           mkdir -p YAKit/INPUT
-          aria2c -x 8 -s 8 --console-log-level=warn \
+          # 多镜像并行: 全球 CDN 优先, aria2c 把这些 URL 当同一文件的镜像,
+          # 跨服务器并行分段下载, 并自动跳过慢/失败 (403/404) 的源.
+          read -ra URLS <<< "${{ steps.rom.outputs.mirrors }}"
+          aria2c -x 16 -s 16 -k 1M --max-tries=3 --console-log-level=warn \
             -d YAKit/INPUT \
             -o "${{ steps.rom.outputs.filename }}" \
-            "${{ steps.rom.outputs.url }}"
+            "${URLS[@]}"
           ls -lh "YAKit/INPUT/${{ steps.rom.outputs.filename }}"
 
       # ━━━ 6.5 决定 SUPER_DEVICE_SIZE (inputs 覆盖 > conf) ━━━━━━━━━━━━━━━━━━
