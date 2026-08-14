@@ -34,6 +34,11 @@ on:
         required: false
         default: false
         type: boolean
+      xiaomi_beta:
+        description: '[Xiaomi] 使用最新 Beta 测试版（关闭时使用正式版）'
+        required: false
+        default: false
+        type: boolean
       swap_boot_kernel:
         description: '[Samsung] 替换 boot.img kernel 为 Kokuban LKM'
         required: false
@@ -153,6 +158,7 @@ jobs:
     with:
       device: ${{ matrix.device }}
       rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
+      beta: ${{ inputs.xiaomi_beta == true }}
       super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
       skip_ksu: ${{ inputs.skip_ksu == true }}
       upload_provider: ${{ inputs.upload_provider || 'gofile' }}

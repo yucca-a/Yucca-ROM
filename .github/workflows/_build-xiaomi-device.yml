@@ -16,6 +16,11 @@ on:
       rom_url:
         required: false
         type: string
+      beta:
+        description: '自动抓取最新 Beta 测试版 ROM'
+        required: false
+        default: false
+        type: boolean
       super_device_size:
         description: 'SUPER_DEVICE_SIZE 字节数 覆盖 (留空从 <device>.conf 读)'
         required: false
@@ -146,7 +151,7 @@ jobs:
           sudo bash .bin/setup-bin-env.sh --no-banner
           echo "[✓] YAK .bin environment ready"
 
-      # ━━━ 5. 获取 ROM 下载链接 (Updater-KMP miotaV3 API) ━━━━━━━━━━━━━━━
+      # ━━━ 5. 获取 ROM 下载链接 (HyperOS.fans / HyperData) ━━━━━━━━━━━━━
       - name: Fetch ROM URL
         id: rom
         run: |
@@ -156,10 +161,14 @@ jobs:
             VERSION=$(echo "$FILENAME" | grep -oP 'OS[\d.]+\.\w+' || echo "custom")
             MIRRORS="$ROM_URL"
           else
-            OUTPUT=$(python3 YAKit/scripts/fetch_ota.py \
+            CHANNEL=stable
+            if [[ "${{ inputs.beta }}" == "true" ]]; then
+              CHANNEL=beta
+            fi
+            OUTPUT=$(python3 .github/scripts/fetch_xiaomi_rom.py \
               --codename "${{ steps.config.outputs.codename }}" \
               --region "${{ steps.config.outputs.region }}" \
-              --android "${{ steps.config.outputs.android_version }}" \
+              --channel "$CHANNEL" \
               --version "${{ steps.config.outputs.system_version }}")
             ROM_URL=$(echo "$OUTPUT" | sed -n '1p')
             VERSION=$(echo "$OUTPUT" | sed -n '2p')
