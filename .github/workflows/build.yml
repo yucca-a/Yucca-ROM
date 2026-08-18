@@ -165,16 +165,16 @@ jobs:
       matrix:
         device: ${{ fromJSON(needs.setup.outputs.devices) }}
     uses: ./.github/workflows/_build-xiaomi-device.yml
-      with:
-        device: ${{ matrix.device }}
-        rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
-        beta: ${{ inputs.xiaomi_beta == true }}
-        skip_debloat: ${{ inputs.skip_debloat == true }}
-        inject_apks: ${{ inputs.inject_apks != false }}
-        super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
-        skip_ksu: ${{ inputs.skip_ksu == true }}
-        upload_provider: ${{ inputs.upload_provider || 'gofile' }}
-        create_release: 'false'
+    with:
+      device: ${{ matrix.device }}
+      rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
+      beta: ${{ inputs.xiaomi_beta == true }}
+      skip_debloat: ${{ inputs.skip_debloat == true }}
+      inject_apks: ${{ inputs.inject_apks != false }}
+      super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
+      skip_ksu: ${{ inputs.skip_ksu == true }}
+      upload_provider: ${{ inputs.upload_provider || 'gofile' }}
+      create_release: 'false'
     secrets: inherit
 
   # ═══ 2b. 构建 Samsung (matrix per device, needs extract_tgy) ══════════════
