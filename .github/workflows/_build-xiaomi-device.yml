@@ -29,6 +29,16 @@ on:
         required: false
         default: false
         type: boolean
+      skip_debloat:
+        description: '跳过 Debloat（移除任务表内应用）'
+        required: false
+        default: false
+        type: boolean
+      inject_apks:
+        description: '是否注入预置 APK（关闭则不替换/补充内置应用）'
+        required: false
+        default: true
+        type: boolean
       upload_provider:
         required: false
         default: 'gofile'
@@ -88,9 +98,13 @@ jobs:
             "https://${{ secrets.YAKIT_TOKEN }}@github.com/${{ env.PROFILES_REPO }}.git" \
             YAK-Profiles
           BRAND="${{ env.BRAND }}"
-          # 从 GitHub Release 拉取 APK 资产 (apks-v1, sha256 校验, 跳过 LFS 配额)
-          # --brand 只拉当前品牌的 APK, 避免下到 Samsung 的并 404
-          python3 YAK-Profiles/scripts/fetch_apks.py --brand "${BRAND}" --root YAK-Profiles
+          if [[ "${{ inputs.inject_apks }}" == "true" ]]; then
+            # 从 GitHub Release 拉取 APK 资产 (apks-v1, sha256 校验, 跳过 LFS 配额)
+            # --brand 只拉当前品牌的 APK, 避免下到 Samsung 的并 404
+            python3 YAK-Profiles/scripts/fetch_apks.py --brand "${BRAND}" --root YAK-Profiles
+          else
+            echo "[~] inject_apks=false，本次构建跳过 APK 下载"
+          fi
           # 通用脚本 (patch_props.sh, inject_apks.sh, upload.sh, flash_*.bat ...)
           cp -r YAK-Profiles/scripts/. YAKit/scripts/
           # 品牌特定内容
@@ -112,6 +126,10 @@ jobs:
             exit 1
           fi
           set -a; source "$CONF"; set +a
+          DEBLOAT_VALUE="${DEBLOAT:-true}"
+          if [[ "${{ inputs.skip_debloat }}" == "true" ]]; then
+            DEBLOAT_VALUE=false
+          fi
           {
             echo "codename=$CODENAME"
             echo "device_name=$DEVICE_NAME"
@@ -124,9 +142,10 @@ jobs:
             echo "ksu_patch=${KSU_PATCH:-true}"
             echo "ksu_input=${KSU_INPUT:-init_boot}"
             echo "fix_scripts=${FIX_SCRIPTS:-}"
-            echo "debloat=${DEBLOAT:-true}"
+            echo "debloat=$DEBLOAT_VALUE"
             echo "super_device_size=${SUPER_DEVICE_SIZE:-}"
             echo "upload_provider=${{ inputs.upload_provider || 'gofile' }}"
+            echo "inject_apks=${{ inputs.inject_apks }}"
           } >> "$GITHUB_OUTPUT"
           echo "===== Device: $DEVICE_NAME ($CODENAME) ====="
 
@@ -372,11 +391,16 @@ jobs:
 
       # ━━━ 13.5 APK 注入 (添加/替换 ROM 内应用) ━━━━━━━━━━━━━━━━━━━━━━━
       - name: Inject APKs
+        if: steps.config.outputs.inject_apks == 'true'
         run: |
           cd YAKit
           bash scripts/inject_apks.sh \
             "PROJECTS/${{ env.PROJECT }}/ROM" \
             "apks"
+      - name: Skip APK inject
+        if: steps.config.outputs.inject_apks != 'true'
+        run: |
+          echo "[~] inject_apks=false，本次构建跳过 APK 注入"
 
       # ━━━ 14. KernelSU 补丁 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: KSU patch
