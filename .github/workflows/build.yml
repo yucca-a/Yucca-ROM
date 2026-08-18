@@ -39,6 +39,16 @@ on:
         required: false
         default: false
         type: boolean
+      skip_debloat:
+        description: '[Xiaomi] 跳过 Debloat（移除任务表内应用）'
+        required: false
+        default: false
+        type: boolean
+      inject_apks:
+        description: '[Xiaomi] 注入预置 APK（关闭则不替换/补充内置应用）'
+        required: false
+        default: true
+        type: boolean
       swap_boot_kernel:
         description: '[Samsung] 替换 boot.img kernel 为 Kokuban LKM'
         required: false
@@ -155,14 +165,16 @@ jobs:
       matrix:
         device: ${{ fromJSON(needs.setup.outputs.devices) }}
     uses: ./.github/workflows/_build-xiaomi-device.yml
-    with:
-      device: ${{ matrix.device }}
-      rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
-      beta: ${{ inputs.xiaomi_beta == true }}
-      super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
-      skip_ksu: ${{ inputs.skip_ksu == true }}
-      upload_provider: ${{ inputs.upload_provider || 'gofile' }}
-      create_release: 'false'
+      with:
+        device: ${{ matrix.device }}
+        rom_url: ${{ inputs.only_device != '' && inputs.rom_url || '' }}
+        beta: ${{ inputs.xiaomi_beta == true }}
+        skip_debloat: ${{ inputs.skip_debloat == true }}
+        inject_apks: ${{ inputs.inject_apks != false }}
+        super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
+        skip_ksu: ${{ inputs.skip_ksu == true }}
+        upload_provider: ${{ inputs.upload_provider || 'gofile' }}
+        create_release: 'false'
     secrets: inherit
 
   # ═══ 2b. 构建 Samsung (matrix per device, needs extract_tgy) ══════════════
