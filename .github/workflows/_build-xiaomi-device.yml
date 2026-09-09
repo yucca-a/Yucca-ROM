@@ -46,8 +46,8 @@ on:
       create_release:
         description: '创建 GitHub Release（由顶层 dispatcher 统一汇总时设为 false）'
         required: false
-        default: 'false'
-        type: string
+        default: false
+        type: boolean
 
 env:
   YAKIT_REPO: yucca-a/YAKit
@@ -662,7 +662,7 @@ jobs:
 
       # ━━━ 21.5 保存构建信息 (供 build-all 汇总 Release 使用) ━━━━━━━━━━━━━
       - name: Save release info artifact
-        if: inputs.create_release == 'false'
+        if: inputs.create_release == false
         run: |
           mkdir -p /tmp/release-info
           {
@@ -678,7 +678,7 @@ jobs:
             echo "debloat=${{ steps.config.outputs.debloat }}"
           } > /tmp/release-info/info.env
       - name: Upload release info
-        if: inputs.create_release == 'false'
+        if: inputs.create_release == false
         uses: actions/upload-artifact@v4
         with:
           name: release-info-${{ steps.config.outputs.codename }}
@@ -697,7 +697,7 @@ jobs:
 
       # ━━━ 23. 创建 Release ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       - name: Create Release
-        if: inputs.create_release != 'false'
+        if: inputs.create_release != false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

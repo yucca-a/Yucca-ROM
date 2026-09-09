@@ -174,7 +174,7 @@ jobs:
       super_device_size: ${{ inputs.only_device != '' && inputs.super_device_size || '' }}
       skip_ksu: ${{ inputs.skip_ksu == true }}
       upload_provider: ${{ inputs.upload_provider || 'gofile' }}
-      create_release: 'false'
+      create_release: false
     secrets: inherit
 
   # ═══ 2b. 构建 Samsung (matrix per device, needs extract_tgy) ══════════════
@@ -202,7 +202,7 @@ jobs:
       skip_ksu: ${{ inputs.skip_ksu == true }}
       swap_boot_kernel: ${{ inputs.swap_boot_kernel != false }}
       upload_provider: ${{ inputs.upload_provider || 'gofile' }}
-      create_release: 'false'
+      create_release: false
     secrets: inherit
 
   # ═══ 3. 汇总 Release (按 brand 渲染) ══════════════════════════════════════
