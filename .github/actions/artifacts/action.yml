@@ -1,0 +1,28 @@
+name: Stage device ROM
+description: Pass this device's ROM and build settings to its release job
+inputs:
+  archive:
+    required: true
+    description: Absolute path to the completed ROM
+  version:
+    required: true
+    description: Stock firmware version
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ARCHIVE: ${{ inputs.archive }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        source "YAK-Profiles/$BRAND/CONFIGS/$DEVICE.conf"
+        export CODENAME DEVICE_NAME KSU_PATCH DEBLOAT REMOVE_AVB REMOVE_ENCRYPT
+        python3 .github/scripts/release.py stage
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rom-${{ env.DEVICE }}
+        path: ${{ runner.temp }}/rom-release/
+        compression-level: 0
+        overwrite: true
+        retention-days: 3
+        if-no-files-found: error

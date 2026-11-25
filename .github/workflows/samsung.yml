@@ -1,0 +1,186 @@
+name: 三星 ROM
+run-name: 三星 · ${{ inputs.target }}
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Galaxy 系列或单一机型
+        type: choice
+        options:
+          - s23
+          - s23/dm1q
+          - s23/dm2q
+          - s23/dm3q
+          - s24
+          - s24/e1q
+          - s24/e2q
+          - s24/e3q
+          - s25
+          - s25/pa1q
+          - s25/pa2q
+          - s25/pa3q
+      extract_gpi_from_tgy:
+        description: 重新从 TGY 提取 GPI（关闭时使用系列缓存）
+        type: boolean
+        default: false
+      swap_boot_kernel:
+        description: 替换为 Kokuban 内核
+        type: boolean
+        default: true
+      patch_ksu:
+        description: 修补 KernelSU (LKM)
+        type: boolean
+        default: true
+      chc_url:
+        description: 单机型 CHC 固件链接（留空自动获取）
+        type: string
+      tgy_url:
+        description: 提取 GPI 时使用的 TGY 链接（留空自动获取）
+        type: string
+permissions:
+  contents: read
+env:
+  PROFILES_REPO: yucca-a/YAK-Profiles
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      devices: ${{ steps.select.outputs.devices }}
+      series: ${{ steps.select.outputs.series }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          TARGET: ${{ inputs.target }}
+          CUSTOM_URL: ${{ inputs.chc_url }}
+          SUPER_SIZE: ''
+        run: python3 .github/scripts/select_devices.py
+  extract:
+    if: inputs.extract_gpi_from_tgy
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      BRAND: Samsung
+      SERIES: ${{ needs.select.outputs.series }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/prepare
+        with:
+          brand: tgy
+          token: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+      - name: 选择系列的 TGY 机型
+        run: |
+          case "$SERIES" in s23) d=dm3q;; s24) d=e3q;; s25) d=pa3q;; *) exit 2;; esac
+          echo "DEVICE=$d" >> "$GITHUB_ENV"
+      - id: stock
+        env:
+          CUSTOM_URL: ${{ inputs.tgy_url }}
+          FIRMWARE_REGION: TGY
+        run: bash .github/scripts/download_stock.sh
+      - name: 提取 GPI
+        env:
+          STOCK: ${{ steps.stock.outputs.file }}
+        run: |
+          bash local_build.sh --device "$DEVICE" --brand Samsung --zip "$STOCK" --gpi-out /tmp/gpi_bundle
+          sudo chown -R "$(id -u):$(id -g)" /tmp/gpi_bundle
+          test -d /tmp/gpi_bundle/priv-app/GooglePackageInstaller
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpi-${{ env.SERIES }}
+          path: /tmp/gpi_bundle
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+      - name: 更新系列 GPI 缓存
+        env:
+          GH_TOKEN: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+        run: |
+          bundle="$RUNNER_TEMP/gpi-bundle-$SERIES.tar.gz"
+          tar -czf "$bundle" -C /tmp/gpi_bundle .
+          gh release create "gpi-$SERIES-$(date -u +%Y%m%d-%H%M%S)-$GITHUB_RUN_ID" "$bundle" --repo "$PROFILES_REPO" --title "GPI $SERIES" --notes "TGY firmware from run $GITHUB_RUN_ID"
+  build:
+    needs: [select, extract]
+    if: ${{ !cancelled() && needs.select.result == 'success' && (needs.extract.result == 'success' || needs.extract.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.select.outputs.devices) }}
+    name: 构建 ${{ matrix.device }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      BRAND: Samsung
+      DEVICE: ${{ matrix.device }}
+      SERIES: ${{ needs.select.outputs.series }}
+      SKIP_KSU: ${{ !inputs.patch_ksu }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/prepare
+        with:
+          brand: Samsung
+          token: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+      - if: inputs.extract_gpi_from_tgy
+        uses: actions/download-artifact@v4
+        with:
+          name: gpi-${{ env.SERIES }}
+          path: /tmp/gpi_bundle
+      - if: ${{ !inputs.extract_gpi_from_tgy }}
+        name: 读取系列 GPI 缓存
+        env:
+          GH_TOKEN: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+        run: |
+          tag=$(gh release list --repo "$PROFILES_REPO" --limit 100 --json tagName --jq "map(select(.tagName | startswith(\"gpi-$SERIES-\")))[0].tagName // empty")
+          [[ -n $tag ]] || { echo '请勾选从 TGY 提取 GPI 以生成缓存'; exit 1; }
+          gh release download "$tag" --repo "$PROFILES_REPO" --pattern "gpi-bundle-$SERIES.tar.gz" --dir "$RUNNER_TEMP"
+          mkdir -p /tmp/gpi_bundle
+          tar -xzf "$RUNNER_TEMP/gpi-bundle-$SERIES.tar.gz" -C /tmp/gpi_bundle
+          test -d /tmp/gpi_bundle/priv-app/GooglePackageInstaller
+      - id: stock
+        name: 获取原厂固件
+        env:
+          CUSTOM_URL: ${{ inputs.chc_url }}
+        run: bash .github/scripts/download_stock.sh
+      - id: package
+        name: 构建镜像和刷机包
+        env:
+          STOCK: ${{ steps.stock.outputs.file }}
+          VERSION: ${{ steps.stock.outputs.version }}
+          GH_TOKEN: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SWAP_KERNEL: ${{ inputs.swap_boot_kernel }}
+          YUCCA_GPI_BUNDLE_DIR: /tmp/gpi_bundle
+        run: |
+          args=()
+          if [[ $SKIP_KSU == true ]]; then args+=(--skip-ksu); fi
+          if [[ $SWAP_KERNEL == true ]]; then args+=(--swap-kernel); fi
+          bash local_build.sh --brand "$BRAND" --device "$DEVICE" --zip "$STOCK" --version "$VERSION" --out "$RUNNER_TEMP/output" "${args[@]}"
+      - uses: ./.github/actions/artifacts
+        env:
+          CHANNEL: CHC
+        with:
+          archive: ${{ steps.package.outputs.archive }}
+          version: ${{ steps.stock.outputs.version }}
+
+  release:
+    needs: [select, build]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    name: 发布 ${{ matrix.device }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.select.outputs.devices) }}
+    concurrency:
+      group: rom-release-${{ matrix.device }}
+      queue: max
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/release
+        env:
+          DEVICE: ${{ matrix.device }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

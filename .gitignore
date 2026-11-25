@@ -1,0 +1,18 @@
+# Build outputs
+output/
+*.tar.gz
+*.img
+*.zip
+
+# Local toolchain and private device data
+.rom-tools/
+YAK-Profiles/
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

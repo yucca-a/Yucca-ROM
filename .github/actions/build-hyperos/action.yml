@@ -1,0 +1,35 @@
+name: Build HyperOS ROM
+description: Build and stage one Xiaomi or REDMI device ROM
+inputs:
+  profiles_token:
+    description: Read the device profiles and their APKs
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/prepare
+      with:
+        brand: xiaomi
+        token: ${{ inputs.profiles_token }}
+    - id: stock
+      name: 获取原厂固件
+      shell: bash
+      run: bash .github/scripts/download_stock.sh
+    - id: package
+      name: 构建镜像和刷机包
+      env:
+        STOCK: ${{ steps.stock.outputs.file }}
+        VERSION: ${{ steps.stock.outputs.version }}
+        GH_TOKEN: ${{ inputs.profiles_token }}
+      shell: bash
+      run: |
+        args=(--system-format "$SYSTEM_FORMAT")
+        if [[ $KEEP_ENCRYPTION == true ]]; then args+=(--keep-encryption); fi
+        if [[ $SKIP_KSU == true ]]; then args+=(--skip-ksu); fi
+        if [[ $SKIP_DEBLOAT == true ]]; then args+=(--skip-debloat); fi
+        if [[ $INJECT_APKS == true ]]; then args+=(--inject-apks); else args+=(--skip-apks); fi
+        bash local_build.sh --brand "$BRAND" --device "$DEVICE" --zip "$STOCK" --version "$VERSION" --out "$RUNNER_TEMP/output" "${args[@]}"
+    - uses: ./.github/actions/artifacts
+      with:
+        archive: ${{ steps.package.outputs.archive }}
+        version: ${{ steps.stock.outputs.version }}

@@ -1,0 +1,23 @@
+name: Publish device ROM
+description: Add one build to the device's GitHub Release
+inputs:
+  check_artifact:
+    description: Publish only staged devices after a partial series build
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: staged
+      if: inputs.check_artifact == 'true'
+      shell: bash
+      run: |
+        count=$(gh api --method GET "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" -f name="rom-$DEVICE" --jq '.total_count')
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+    - if: inputs.check_artifact != 'true' || steps.staged.outputs.count != '0'
+      uses: actions/download-artifact@v4
+      with:
+        name: rom-${{ env.DEVICE }}
+        path: ${{ runner.temp }}/rom-release
+    - if: inputs.check_artifact != 'true' || steps.staged.outputs.count != '0'
+      shell: bash
+      run: python3 .github/scripts/release.py publish

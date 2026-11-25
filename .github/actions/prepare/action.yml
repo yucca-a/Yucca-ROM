@@ -1,0 +1,37 @@
+name: Prepare ROM build tools
+description: Load the device profiles and install the pinned host tools
+inputs:
+  brand:
+    required: true
+    description: xiaomi, Samsung or tgy
+  token:
+    required: true
+    description: Read access to the device profile repository
+runs:
+  using: composite
+  steps:
+    - uses: jlumbroso/free-disk-space@cf1e78c50ca91e757bab3edc229027eebfc07871
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+    - uses: actions/checkout@v4
+      with:
+        repository: yucca-a/YAK-Profiles
+        ref: 52018fa836d8ef3a273945ec5644bc8c0ca2c437
+        path: YAK-Profiles
+        token: ${{ inputs.token }}
+        persist-credentials: false
+    - shell: bash
+      env:
+        BRAND_TOOLS: ${{ inputs.brand }}
+      run: |
+        tools="$RUNNER_TEMP/rom-tools"
+        bash builder/setup.sh "$tools" "$BRAND_TOOLS"
+        touch "$tools/.ready-$BRAND_TOOLS-$(sha256sum builder/setup.sh | cut -c1-12)"
+        echo "ROM_TOOLS=$tools" >> "$GITHUB_ENV"
+        if [[ -d "$tools/venv/bin" ]]; then echo "$tools/venv/bin" >> "$GITHUB_PATH"; fi

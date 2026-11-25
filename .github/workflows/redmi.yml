@@ -1,0 +1,123 @@
+name: 红米 ROM
+run-name: 红米 · ${{ inputs.device }} · ${{ inputs.channel }}
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: 机型或整个系列
+        type: choice
+        default: REDMI K90 (annibale)
+        options:
+          - REDMI K90 系列
+          - REDMI K90 (annibale)
+          - REDMI K90 Max (prague)
+          - REDMI K90 Pro Max (myron)
+          - REDMI K80 系列
+          - REDMI K80 (zorn)
+          - REDMI K80 Pro (miro)
+          - REDMI K80 Ultra (dali)
+          - REDMI Turbo 5 系列
+          - REDMI Turbo 5 (klee)
+          - REDMI Turbo 5 Max (dash)
+          - REDMI Turbo 4 系列
+          - REDMI Turbo 4 (rodin)
+          - REDMI Turbo 4 Pro (onyx)
+      channel:
+        description: 固件渠道
+        type: choice
+        options: [stable, beta]
+      system_format:
+        description: system、product、system_ext 的格式（Official 跟随官方）
+        type: choice
+        default: Official
+        options: [Official, Ext4, F2FS]
+      debloat:
+        description: 精简应用
+        type: boolean
+        default: true
+      keep_encryption:
+        description: 加密Data
+        type: boolean
+        default: true
+      patch_ksu:
+        description: 修补 KernelSU (LKM)
+        type: boolean
+        default: true
+      inject_apks:
+        description: 注入预置 APK
+        type: boolean
+        default: false
+      rom_url:
+        description: 单机型 OTA 链接（留空自动获取）
+        type: string
+      super_device_size:
+        description: 单机型 super 容量（字节，留空读设备配置）
+        type: string
+permissions:
+  contents: read
+jobs:
+  select:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    outputs:
+      devices: ${{ steps.select.outputs.devices }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: select
+        env:
+          FAMILY: redmi
+          TARGET: ${{ inputs.device }}
+          CUSTOM_URL: ${{ inputs.rom_url }}
+          SUPER_SIZE: ${{ inputs.super_device_size }}
+        run: python3 .github/scripts/select_devices.py
+  build:
+    needs: select
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.select.outputs.devices) }}
+    name: 构建 ${{ matrix.device }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-hyperos
+        with:
+          profiles_token: ${{ secrets.PROFILES_TOKEN || secrets.YAKIT_TOKEN }}
+        env:
+          BRAND: xiaomi
+          DEVICE: ${{ matrix.device }}
+          CHANNEL: ${{ inputs.channel }}
+          SYSTEM_FORMAT: ${{ inputs.system_format }}
+          KEEP_ENCRYPTION: ${{ inputs.keep_encryption }}
+          SKIP_DEBLOAT: ${{ !inputs.debloat }}
+          SKIP_KSU: ${{ !inputs.patch_ksu }}
+          INJECT_APKS: ${{ inputs.inject_apks }}
+          CUSTOM_URL: ${{ inputs.rom_url }}
+          ROM_SUPER_SIZE: ${{ inputs.super_device_size }}
+
+  release:
+    needs: [select, build]
+    if: ${{ !cancelled() && needs.select.result == 'success' && needs.build.result != 'skipped' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.select.outputs.devices) }}
+    name: 发布 ${{ matrix.device }}
+    concurrency:
+      group: rom-release-${{ matrix.device }}
+      queue: max
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/release
+        with:
+          check_artifact: ${{ needs.build.result == 'failure' }}
+        env:
+          DEVICE: ${{ matrix.device }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
