@@ -17,7 +17,7 @@ class DeviceReleaseTest(unittest.TestCase):
         tag, title, archive = release.identity(info)
         self.assertEqual(archive, "YuccaROM_popsicle_v1_stable_r1-1.zip")
         self.assertEqual(title, "Xiaomi 17 Pro Max (popsicle)")
-        self.assertEqual(tag, "Xiaomi\u00a017\u00a0Pro\u00a0Max\u00a0(popsicle)")
+        self.assertEqual(tag, "Xiaomi-17-Pro-Max-(popsicle)")
 
     def test_hyperos_release_names(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,7 +98,7 @@ class DeviceReleaseTest(unittest.TestCase):
 
         def upload(cmd, action, tag, file, *_):
             nonlocal interrupted
-            self.assertEqual((cmd, action, tag), ("release", "upload", "Samsung\u00a0Galaxy\u00a0S24+\u00a0(e2q)"))
+            self.assertEqual((cmd, action, tag), ("release", "upload", "Samsung-Galaxy-S24+-(e2q)"))
             path = Path(file)
             self.assertNotIn(path.name, uploads)
             uploads[path.name] = dict(id=len(uploads), name=path.name, size=path.stat().st_size,
@@ -125,6 +125,8 @@ class DeviceReleaseTest(unittest.TestCase):
                     release.stage(folder)
                     info = json.loads((folder / "build.json").read_text(encoding="utf-8"))
                     self.assertEqual(release.identity(info)[1], "Samsung Galaxy S24+ (e2q)")
+                    if attempt == 2:
+                        releases[0].update(draft=True, tag_name="Samsung\u00a0Galaxy\u00a0S24+\u00a0(e2q)")
                     release.publish(folder)
                     self.assertEqual(sleep.call_count, 2)
                     release.publish(folder)
@@ -133,7 +135,7 @@ class DeviceReleaseTest(unittest.TestCase):
                     self.assertEqual(releases[0]["body"].count("<!-- rom:"), min(attempt, 2))
                     for filename in uploads:
                         self.assertIn(f"/{filename})", releases[0]["body"])
-                self.assertIn("/download/Samsung%C2%A0Galaxy%C2%A0S24%2B%C2%A0%28e2q%29/", releases[0]["body"])
+                self.assertIn("/download/Samsung-Galaxy-S24%2B-%28e2q%29/", releases[0]["body"])
                 archive_name = release.identity(info)[2]
                 uploads[archive_name + ".sha256"]["digest"] = "sha256:bad"
                 with self.assertRaisesRegex(ValueError, "Conflicting release asset"):

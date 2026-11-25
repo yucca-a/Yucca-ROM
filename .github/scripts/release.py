@@ -29,8 +29,8 @@ def identity(info):
         raise ValueError("Expected a single-line device name")
     device = info["device"]
     title = f"{model} ({device})"
-    # Git forbids ASCII spaces in refs. Non-breaking spaces retain the model's typography.
-    tag = title.replace(" ", "\u00a0")
+    # GitHub validates whitespace again when a draft becomes public.
+    tag = title.replace(" ", "-")
     subprocess.run(["git", "check-ref-format", f"refs/tags/{tag}"], check=True)
     variant = info.get("encryption")
     if variant is not None and variant not in ENCRYPTION_LABELS:
@@ -115,8 +115,9 @@ def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
 def gh(*args, payload=None):
     result = subprocess.run(["gh", *args], input=payload, capture_output=True, encoding="utf-8")
     if result.returncode:
-        message = result.stderr.strip() or result.stdout.strip()
-        if re.search(r"HTTP (?:408|429|5\d\d)|unexpected (?:end of JSON input|EOF)|"
+        message = "\n".join(filter(None, (result.stderr.strip(), result.stdout.strip())))
+        if (args[:2] == ("release", "upload") and "HTTP 422" in message) or re.search(
+                     r"HTTP (?:408|429|5\d\d)|unexpected (?:end of JSON input|EOF)|"
                      r"timed? ?out|connection (?:reset|refused)|TLS handshake timeout|"
                      r"secondary rate limit|already_exists", message, re.I):
             raise ConnectionError(message)
@@ -196,8 +197,20 @@ def publish(folder):
     repo = os.environ["GH_REPO"]
     endpoint = f"repos/{repo}/releases"
     def find_or_create():
-        matches = list_entries(endpoint, f'.[] | select(.tag_name == {json.dumps(tag)}) | {{id,body,draft,immutable}}')
-        return matches[0] if matches else request(
+        legacy_tag = title.replace(" ", "\u00a0")
+        matches = list_entries(endpoint, f'.[] | select(.tag_name == {json.dumps(tag)} or '
+                               f'.tag_name == {json.dumps(legacy_tag)}) | {{id,tag_name,body,draft,immutable}}')
+        for item in matches:
+            if item["tag_name"] == tag:
+                return item
+        if matches:
+            old = matches[0]
+            if not old["draft"]:
+                raise ValueError(f"Cannot migrate a public release automatically: {legacy_tag}")
+            body = old["body"].replace("/download/" + quote(legacy_tag, safe="") + "/",
+                                       "/download/" + quote(tag, safe="") + "/")
+            return request("PATCH", f"{endpoint}/{old['id']}", tag_name=tag, body=body)
+        return request(
             "POST", endpoint, tag_name=tag, target_commitish=os.environ["GITHUB_SHA"],
             name=title, draft=True, body=notes_for(info))
 
