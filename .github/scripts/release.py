@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from random import uniform
 from urllib.parse import quote
 
 
@@ -111,8 +113,27 @@ def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
 
 
 def gh(*args, payload=None):
-    return subprocess.run(["gh", *args], check=True, input=payload,
-                          stdout=subprocess.PIPE, encoding="utf-8").stdout
+    result = subprocess.run(["gh", *args], input=payload, capture_output=True, encoding="utf-8")
+    if result.returncode:
+        message = result.stderr.strip() or result.stdout.strip()
+        if re.search(r"HTTP (?:408|429|5\d\d)|unexpected (?:end of JSON input|EOF)|"
+                     r"timed? ?out|connection (?:reset|refused)|TLS handshake timeout|"
+                     r"secondary rate limit|already_exists", message, re.I):
+            raise ConnectionError(message)
+        raise RuntimeError(message or f"gh exited with status {result.returncode}")
+    return result.stdout
+
+
+def retry_remote(label, operation):
+    for attempt in range(6):
+        try:
+            return operation()
+        except (ConnectionError, json.JSONDecodeError) as exc:
+            if attempt == 5:
+                raise
+            delay = min(10 * 2**attempt, 90) + uniform(0, 5)
+            print(f"{label}: {exc}. Retrying in {delay:.0f}s", file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def request(method, endpoint, **fields):
@@ -174,10 +195,13 @@ def publish(folder):
     names.append(name + ".sha256")
     repo = os.environ["GH_REPO"]
     endpoint = f"repos/{repo}/releases"
-    matches = list_entries(endpoint, f'.[] | select(.tag_name == {json.dumps(tag)}) | {{id,body,draft,immutable}}')
-    release = matches[0] if matches else request(
-        "POST", endpoint, tag_name=tag, target_commitish=os.environ["GITHUB_SHA"],
-        name=title, draft=True, body=notes_for(info))
+    def find_or_create():
+        matches = list_entries(endpoint, f'.[] | select(.tag_name == {json.dumps(tag)}) | {{id,body,draft,immutable}}')
+        return matches[0] if matches else request(
+            "POST", endpoint, tag_name=tag, target_commitish=os.environ["GITHUB_SHA"],
+            name=title, draft=True, body=notes_for(info))
+
+    release = retry_remote(f"Find or create {title}", find_or_create)
     if release.get("immutable"):
         raise ValueError(f"Cannot append ROMs to immutable release {tag}")
     release_url = f"{endpoint}/{release['id']}"
@@ -185,7 +209,7 @@ def publish(folder):
         rows = list_entries(release_url + "/assets", ".[] | {id,name,size,state,digest}")
         return {asset["name"]: asset for asset in rows}
 
-    existing = remote_assets()
+    existing = retry_remote("List release assets", remote_assets)
     family = re.compile(re.escape(archive.stem) + r"(?:-[1-9][0-9]*)?\.zip")
     if any(family.fullmatch(asset) and asset not in names for asset in existing):
         raise ValueError(f"Conflicting release asset: {name} already has a different set of volumes")
@@ -205,22 +229,29 @@ def publish(folder):
     with tempfile.TemporaryDirectory(dir=folder.parent) as temp:
         for path, digest in assets(archive, Path(temp), ASSET_LIMIT, PART_SIZE):
             expected[path.name] = "sha256:" + digest
-            prior = existing.get(path.name)
-            if prior and prior["state"] == "starter":
-                gh("api", "-X", "DELETE", f"{endpoint}/assets/{prior['id']}")
-            elif prior:
-                if (prior["state"] != "uploaded" or prior["size"] != path.stat().st_size
-                        or prior["digest"] != "sha256:" + digest):
-                    raise ValueError(f"Conflicting release asset: {path.name}")
-                continue
-            gh("release", "upload", tag, str(path), "--repo", repo)
-    uploaded = remote_assets()
-    for filename, wanted in expected.items():
-        asset = uploaded.get(filename, {})
-        if asset.get("state") != "uploaded" or asset.get("digest") != wanted:
-            raise ValueError(f"GitHub did not confirm the uploaded content of {filename}")
+            def ensure_uploaded():
+                prior = remote_assets().get(path.name)
+                if prior and prior["state"] == "starter":
+                    gh("api", "-X", "DELETE", f"{endpoint}/assets/{prior['id']}")
+                elif prior:
+                    if (prior["state"] != "uploaded" or prior["size"] != path.stat().st_size
+                            or prior["digest"] != "sha256:" + digest):
+                        raise ValueError(f"Conflicting release asset: {path.name}")
+                    return
+                gh("release", "upload", tag, str(path), "--repo", repo)
+            retry_remote(path.name, ensure_uploaded)
+
+    def verify_uploads():
+        uploaded = remote_assets()
+        for filename, wanted in expected.items():
+            asset = uploaded.get(filename, {})
+            if asset.get("digest") and asset["digest"] != wanted:
+                raise ValueError(f"Conflicting release asset: {filename}")
+            if asset.get("state") != "uploaded" or asset.get("digest") != wanted:
+                raise ConnectionError(f"GitHub has not confirmed the uploaded content of {filename}")
+    retry_remote("Verify release assets", verify_uploads)
     if release["draft"] or body != release["body"]:
-        request("PATCH", release_url, body=body, draft=False)
+        retry_remote(f"Publish {title}", lambda: request("PATCH", release_url, body=body, draft=False))
     print(f"Published {title}: https://github.com/{repo}/releases/tag/{encoded_tag}")
 
 

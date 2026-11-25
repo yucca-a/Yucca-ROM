@@ -168,6 +168,7 @@ jobs:
     name: 发布 ${{ matrix.device }}
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         device: ${{ fromJSON(needs.select.outputs.devices) }}
     concurrency:

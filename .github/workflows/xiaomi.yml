@@ -110,6 +110,7 @@ jobs:
     if: ${{ !cancelled() && needs.select.result == 'success' && needs.build.result != 'skipped' }}
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         device: ${{ fromJSON(needs.select.outputs.devices) }}
     name: 发布 ${{ matrix.device }}

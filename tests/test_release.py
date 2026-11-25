@@ -90,6 +90,7 @@ class DeviceReleaseTest(unittest.TestCase):
             if method == "POST":
                 self.assertFalse(releases)
                 releases.append(dict(id=10, **fields))
+                raise json.JSONDecodeError("lost create response", "", 0)
             else:
                 self.assertEqual(method, "PATCH")
                 releases[0].update(fields)
@@ -99,14 +100,15 @@ class DeviceReleaseTest(unittest.TestCase):
             nonlocal interrupted
             self.assertEqual((cmd, action, tag), ("release", "upload", "Samsung\u00a0Galaxy\u00a0S24+\u00a0(e2q)"))
             path = Path(file)
-            if path.suffix == ".sha256" and interrupted:
-                interrupted = False
-                raise ConnectionError("upload interrupted")
             self.assertNotIn(path.name, uploads)
             uploads[path.name] = dict(id=len(uploads), name=path.name, size=path.stat().st_size,
                                       state="uploaded", digest="sha256:" + hashlib.sha256(path.read_bytes()).hexdigest())
+            if path.suffix == ".sha256" and interrupted:
+                interrupted = False
+                raise ConnectionError("HTTP 502 after upload")
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(release, "list_entries", listing), \
+                patch.object(release.time, "sleep") as sleep, \
                 patch.object(release, "ASSET_LIMIT", 2), patch.object(release, "PART_SIZE", 1), \
                 patch.object(release, "request", request), patch.object(release, "gh", upload):
             root = Path(tmp)
@@ -123,12 +125,8 @@ class DeviceReleaseTest(unittest.TestCase):
                     release.stage(folder)
                     info = json.loads((folder / "build.json").read_text(encoding="utf-8"))
                     self.assertEqual(release.identity(info)[1], "Samsung Galaxy S24+ (e2q)")
-                    if attempt == 1:
-                        with self.assertRaises(ConnectionError):
-                            release.publish(folder)
-                        self.assertTrue(releases[0]["draft"])
-                        self.assertNotIn("<!-- rom:", releases[0]["body"])
                     release.publish(folder)
+                    self.assertEqual(sleep.call_count, 2)
                     release.publish(folder)
                     self.assertFalse(releases[0]["draft"])
                     self.assertEqual(len(uploads), 3 * min(attempt, 2))
