@@ -80,6 +80,18 @@ def part_name(archive, index):
     return f"{archive.stem}-{index}.zip"
 
 
+def merge_script(archive_name, count, size, digest):
+    if not re.fullmatch(r"YuccaROM_[A-Za-z0-9._-]+\.zip", archive_name):
+        raise ValueError(f"Invalid ROM archive name: {archive_name}")
+    if count < 2 or size <= 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("Invalid volume metadata")
+    template = Path(__file__).resolve().parents[1] / "release-templates/merge.bat"
+    script = template.read_text(encoding="utf-8")
+    for key, value in (("@ARCHIVE@", archive_name), ("@COUNT@", count), ("@SIZE@", size), ("@SHA256@", digest)):
+        script = script.replace(key, str(value))
+    return script.replace("\n", "\r\n").encode("utf-8")
+
+
 def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
     """Yield one upload at a time. Only the current part needs extra disk space."""
     size = archive.stat().st_size
@@ -110,6 +122,11 @@ def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
     checksum = temp / (archive.name + ".sha256")
     checksum.write_bytes(f"{whole.hexdigest()}  {archive.name}\n".encode("ascii"))
     yield checksum, hashlib.sha256(checksum.read_bytes()).hexdigest()
+    if size >= limit:
+        helper = temp / f"{archive.stem}-merge.bat"
+        data = merge_script(archive.name, (size + part_size - 1) // part_size, size, whole.hexdigest())
+        helper.write_bytes(data)
+        yield helper, hashlib.sha256(data).hexdigest()
 
 
 def gh(*args, payload=None):
@@ -155,7 +172,7 @@ def notes_for(info):
             + INDEX + "\n\n### 合并与校验\n\n"
             "单个 ZIP 可直接校验。分卷请全部下载到同一目录，按编号从小到大合并为整包。"
             "以两卷为例，将「包名」换成实际文件名前缀，更多分卷按顺序追加到输入文件列表。\n\n"
-            "- Windows（cmd）：`copy /b 包名-1.zip+包名-2.zip 包名.zip`\n"
+            "- Windows：下载对应的 `-merge.bat`，与全部分卷放在同一目录，双击即可合并并校验。\n"
             "- Linux / macOS：`cat 包名-1.zip 包名-2.zip > 包名.zip`\n\n"
             "刷入前对照 `.sha256` 核对整包 SHA-256。\n\n"
             + flashing)
@@ -194,6 +211,8 @@ def publish(folder):
     count = 1 if size < ASSET_LIMIT else (size + PART_SIZE - 1) // PART_SIZE
     names = ([name] if count == 1 else [part_name(archive, i) for i in range(1, count + 1)])
     names.append(name + ".sha256")
+    if count > 1:
+        names.append(f"{archive.stem}-merge.bat")
     repo = os.environ["GH_REPO"]
     endpoint = f"repos/{repo}/releases"
     def find_or_create():
@@ -226,7 +245,7 @@ def publish(folder):
     family = re.compile(re.escape(archive.stem) + r"(?:-[1-9][0-9]*)?\.zip")
     if any(family.fullmatch(asset) and asset not in names for asset in existing):
         raise ValueError(f"Conflicting release asset: {name} already has a different set of volumes")
-    checksum = existing.get(names[-1])
+    checksum = existing.get(name + ".sha256")
     if checksum and checksum["state"] == "uploaded":
         manifest = f"{info['sha256']}  {name}\n".encode("ascii")
         if checksum["digest"] != "sha256:" + hashlib.sha256(manifest).hexdigest():
@@ -236,6 +255,8 @@ def publish(folder):
     encoded_tag = quote(tag, safe="")
     base = f"https://github.com/{repo}/releases/download/{encoded_tag}/"
     labels = (["ZIP"] if count == 1 else [f"分卷 {i}" for i in range(1, count + 1)]) + ["SHA-256"]
+    if count > 1:
+        labels.append("Windows 合并并校验")
     links = [f"[{label}]({base}{filename})" for label, filename in zip(labels, names)]
     body = add_entry(release["body"], info, links, name)
     expected = {}

@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,7 +50,7 @@ class DeviceReleaseTest(unittest.TestCase):
                         if asset.suffix == ".sha256":
                             self.assertEqual(asset.read_text().split()[1], name)
                     stem = Path(name).stem
-                    self.assertEqual(links, [f"{stem}-1.zip", f"{stem}-2.zip", name + ".sha256"])
+                    self.assertEqual(links, [f"{stem}-1.zip", f"{stem}-2.zip", name + ".sha256", stem + "-merge.bat"])
                     entry = release.add_entry(release.INDEX, info, links, name)
                     self.assertIn(f"**{display}**", entry)
                     self.assertIn("**加密Data**" if variant == "encrypted" else "**解密Data**", entry)
@@ -60,7 +61,7 @@ class DeviceReleaseTest(unittest.TestCase):
     def test_split_boundary_and_whole_file_checksum(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            archive = root / "test.zip"
+            archive = root / "YuccaROM_test.zip"
             for size in (1, 9, 10, 11, 12, 65):
                 with self.subTest(size=size):
                     archive.write_bytes(bytes(range(size)))
@@ -70,13 +71,50 @@ class DeviceReleaseTest(unittest.TestCase):
                         self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
                         if asset.suffix == ".sha256":
                             whole = hashlib.sha256(b"".join(chunks)).hexdigest()
-                            self.assertEqual(data.decode(), f"{whole}  test.zip\n")
+                            self.assertEqual(data.decode(), f"{whole}  {archive.name}\n")
+                        elif asset.suffix == ".bat":
+                            self.assertIn(f"YUCCA_ROM_HASH={whole}".encode(), data)
+                            self.assertIn(f"YUCCA_ROM_PARTS={len(chunks)}".encode(), data)
                         else:
-                            self.assertEqual(asset.name, "test.zip" if size < 10
-                                             else f"test-{len(chunks) + 1}.zip")
+                            self.assertEqual(asset.name, archive.name if size < 10
+                                             else f"{archive.stem}-{len(chunks) + 1}.zip")
                             self.assertLess(len(data), 10)
                             chunks.append(data)
                     self.assertEqual(b"".join(chunks), archive.read_bytes())
+
+    @unittest.skipUnless(os.name == "nt", "runs the downloadable Windows batch file")
+    def test_double_click_merge(self):
+        with tempfile.TemporaryDirectory(prefix="ROM & (test)! ") as tmp:
+            folder = Path(tmp) / "测试 目录"
+            folder.mkdir()
+            archive = folder / "YuccaROM_popsicle_v1_beta_decrypted.zip"
+            data = bytes(range(11))
+            bat = folder / "merge.bat"
+            bat.write_bytes(release.merge_script(archive.name, 11, len(data), hashlib.sha256(data).hexdigest()))
+            parts = [folder / release.part_name(archive, i) for i in range(1, 12)]
+            for part, byte in zip(parts, data):
+                part.write_bytes(bytes([byte]))
+
+            def run_batch(expected):
+                result = subprocess.run([os.environ["ComSpec"], "/d", "/c", bat.name], cwd=folder,
+                                        env={**os.environ, "PATH": os.environ["SystemRoot"] + r"\System32"},
+                                        input=b"\r\n", capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, expected, (result.stdout, result.stderr))
+                self.assertFalse(list(folder.glob("*.tmp")))
+
+            run_batch(0)
+            self.assertEqual(archive.read_bytes(), data)
+            run_batch(0)
+            archive.write_bytes(b"keep")
+            run_batch(1)
+            self.assertEqual(archive.read_bytes(), b"keep")
+            archive.unlink()
+            parts[4].unlink()
+            run_batch(1)
+            self.assertFalse(archive.exists())
+            parts[4].write_bytes(b"X")
+            run_batch(1)
+            self.assertFalse(archive.exists())
 
     def test_publish_resume_and_append(self):
         releases = []
@@ -131,7 +169,7 @@ class DeviceReleaseTest(unittest.TestCase):
                     self.assertEqual(sleep.call_count, 2)
                     release.publish(folder)
                     self.assertFalse(releases[0]["draft"])
-                    self.assertEqual(len(uploads), 3 * min(attempt, 2))
+                    self.assertEqual(len(uploads), 4 * min(attempt, 2))
                     self.assertEqual(releases[0]["body"].count("<!-- rom:"), min(attempt, 2))
                     for filename in uploads:
                         self.assertIn(f"/{filename})", releases[0]["body"])
