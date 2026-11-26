@@ -176,7 +176,7 @@ def notes_for(info):
             + INDEX + "\n\n### 合并与校验\n\n"
             "单个 ZIP 可直接校验。分卷请全部下载到同一目录，按编号从小到大合并为整包。"
             "以两卷为例，将「包名」换成实际文件名前缀，更多分卷按顺序追加到输入文件列表。\n\n"
-            "- Windows：下载对应的 `-merge.bat`，与全部分卷放在同一目录，双击即可合并并校验。\n"
+            "- Windows：将对应的 `-check-merge.bat` 与全部分卷放在同一目录，双击即可逐卷校验、合并并验证整包。\n"
             "- Linux / macOS：`cat 包名-1.zip 包名-2.zip > 包名.zip`\n\n"
             "刷入前对照 `.sha256` 核对整包 SHA-256。\n\n"
             + flashing)
