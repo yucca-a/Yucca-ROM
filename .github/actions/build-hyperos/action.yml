@@ -29,6 +29,11 @@ runs:
         if [[ $SKIP_DEBLOAT == true ]]; then args+=(--skip-debloat); fi
         if [[ $INJECT_APKS == true ]]; then args+=(--inject-apks); else args+=(--skip-apks); fi
         bash local_build.sh --brand "$BRAND" --device "$DEVICE" --zip "$STOCK" --version "$VERSION" --out "$RUNNER_TEMP/output" "${args[@]}"
+    - name: 检查线卡刷一体包
+      env:
+        ARCHIVE: ${{ steps.package.outputs.archive }}
+      shell: bash
+      run: python3 builder/verify_xiaomi_package.py "$ARCHIVE" "$DEVICE"
     - uses: ./.github/actions/artifacts
       with:
         archive: ${{ steps.package.outputs.archive }}

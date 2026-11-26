@@ -21,24 +21,40 @@ def enabled(key, default="true"):
     return value == "true"
 
 
-def xiaomi_zip(z, images, scripts, tools, work, ksu):
+def xiaomi_zip(z, images, scripts, tools, work, ksu, device):
+    super_image = images / "super.img"
+    firmware = sorted(img for img in images.glob("*.img") if img != super_image)
+    manifest = ["YUCCA_FLASH_V1", device, str(super_image.stat().st_size)]
+    manifest.extend(f"{img.stem} {img.stat().st_size}" for img in firmware)
+    z.writestr("META-INF/yucca/flash_manifest.txt", "\n".join(manifest) + "\n")
+
     compressed = work / "super.img.zst"
-    run("zstd", "-T0", "-1", images / "super.img", "-o", compressed)
-    (images / "super.img").unlink()
-    z.write(compressed, compressed.name)
-    compressed.unlink()
-    for img in sorted(images.glob("*.img")):
-        if img.name != "super.img":
-            z.write(img, "images/" + img.name, zipfile.ZIP_DEFLATED, compresslevel=1)
-    for item in ("flash_all.bat", "flash_all_except_storage.bat", "Tool.bat"):
-        z.write(scripts / item, item)
-    for item in ("update-binary", "updater-script"):
-        z.write(scripts / "flash_package" / item, "META-INF/com/google/android/" + item)
+    run("zstd", "-T0", "-1", "--check", super_image, "-o", compressed)
+    super_image.unlink()
+    for img in firmware:
+        z.write(img, "images/" + img.name, zipfile.ZIP_DEFLATED, compresslevel=1)
+    flash_scripts = Path(__file__).parent / "windows"
+    launcher = (flash_scripts / "launcher.bat").read_text(encoding="ascii")
+    implementation = (flash_scripts / "flash.ps1").read_text(encoding="utf-8-sig")
+    for filename, wipe_flag in (("flash_all.bat", " -Wipe"), ("flash_all_except_storage.bat", "")):
+        batch = launcher.replace("@WIPE@", wipe_flag).rstrip("\n") + "\n" + implementation
+        z.writestr(filename, batch.replace("\n", "\r\n").encode("utf-8"))
+    z.write(scripts / "Tool.bat", "Tool.bat")
+    recovery = Path(__file__).parent / "recovery"
+    z.write(recovery / "update-binary.sh", "META-INF/com/google/android/update-binary")
+    z.writestr("META-INF/com/google/android/updater-script", "# Installation runs in update-binary.\n")
     z.write(tools / "zstd_arm64", "META-INF/zstd_arm64")
     for item in ("adb.exe", "fastboot.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "zstd.exe"):
         z.write(tools / item, item)
     if ksu:
         z.write(tools / "KernelSU.apk", "KernelSU.apk")
+    # Recovery reads the stored ZIP64 member directly when unzip cannot stream it.
+    super_member = zipfile.ZipInfo.from_file(compressed, compressed.name)
+    with compressed.open("rb") as source, z.open(super_member, "w", force_zip64=True) as dest:
+        super_offset = z.fp.tell()
+        shutil.copyfileobj(source, dest, 8 * 1024 * 1024)
+    z.writestr("META-INF/yucca/super_range.txt", f"{super_offset} {super_member.file_size}\n")
+    compressed.unlink()
 
 
 def write_odin_tar(z, stock_member, dest, replacements, skip=()):
@@ -166,7 +182,7 @@ def build(args, work):
     try:
         with zipfile.ZipFile(partial, "w", allowZip64=True) as z:
             if is_xiaomi:
-                xiaomi_zip(z, images, scripts, args.tools, work, ksu)
+                xiaomi_zip(z, images, scripts, args.tools, work, ksu, args.device)
             else:
                 for file in files:
                     z.write(file, file.name, zipfile.ZIP_DEFLATED, compresslevel=1)
