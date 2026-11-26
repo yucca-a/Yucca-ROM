@@ -50,7 +50,7 @@ class DeviceReleaseTest(unittest.TestCase):
                         if asset.suffix == ".sha256":
                             self.assertEqual(asset.read_text().split()[1], name)
                     stem = Path(name).stem
-                    self.assertEqual(links, [f"{stem}-1.zip", f"{stem}-2.zip", name + ".sha256", stem + "-merge.bat"])
+                    self.assertEqual(links, [f"{stem}-1.zip", f"{stem}-2.zip", name + ".sha256", stem + "-check-merge.bat"])
                     entry = release.add_entry(release.INDEX, info, links, name)
                     self.assertIn(f"**{display}**", entry)
                     self.assertIn("**加密Data**" if variant == "encrypted" else "**解密Data**", entry)
@@ -90,7 +90,8 @@ class DeviceReleaseTest(unittest.TestCase):
             archive = folder / "YuccaROM_popsicle_v1_beta_decrypted.zip"
             data = bytes(range(11))
             bat = folder / "merge.bat"
-            bat.write_bytes(release.merge_script(archive.name, 11, len(data), hashlib.sha256(data).hexdigest()))
+            hashes = [hashlib.sha256(bytes([byte])).hexdigest() for byte in data]
+            bat.write_bytes(release.merge_script(archive.name, hashes, len(data), hashlib.sha256(data).hexdigest()))
             parts = [folder / release.part_name(archive, i) for i in range(1, 12)]
             for part, byte in zip(parts, data):
                 part.write_bytes(bytes([byte]))
@@ -101,6 +102,7 @@ class DeviceReleaseTest(unittest.TestCase):
                                         input=b"\r\n", capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, expected, (result.stdout, result.stderr))
                 self.assertFalse(list(folder.glob("*.tmp")))
+                return result.stdout
 
             run_batch(0)
             self.assertEqual(archive.read_bytes(), data)
@@ -113,7 +115,11 @@ class DeviceReleaseTest(unittest.TestCase):
             run_batch(1)
             self.assertFalse(archive.exists())
             parts[4].write_bytes(b"X")
-            run_batch(1)
+            parts[7].write_bytes(b"Y")
+            errors = run_batch(1)
+            for number in (4, 7):
+                self.assertIn(hashes[number].encode(), errors)
+                self.assertIn(parts[number].name.encode(), errors)
             self.assertFalse(archive.exists())
 
     def test_publish_resume_and_append(self):

@@ -80,14 +80,16 @@ def part_name(archive, index):
     return f"{archive.stem}-{index}.zip"
 
 
-def merge_script(archive_name, count, size, digest):
+def merge_script(archive_name, part_hashes, size, digest):
     if not re.fullmatch(r"YuccaROM_[A-Za-z0-9._-]+\.zip", archive_name):
         raise ValueError(f"Invalid ROM archive name: {archive_name}")
-    if count < 2 or size <= 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+    if len(part_hashes) < 2 or size <= 0 or not all(
+            re.fullmatch(r"[0-9a-f]{64}", h) for h in [digest, *part_hashes]):
         raise ValueError("Invalid volume metadata")
     template = Path(__file__).resolve().parents[1] / "release-templates/merge.bat"
     script = template.read_text(encoding="utf-8")
-    for key, value in (("@ARCHIVE@", archive_name), ("@COUNT@", count), ("@SIZE@", size), ("@SHA256@", digest)):
+    for key, value in (("@ARCHIVE@", archive_name), ("@COUNT@", len(part_hashes)), ("@SIZE@", size),
+                       ("@SHA256@", digest), ("@PART_HASHES@", "\n".join(f"    '{h}'" for h in part_hashes))):
         script = script.replace(key, str(value))
     return script.replace("\n", "\r\n").encode("utf-8")
 
@@ -98,6 +100,7 @@ def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
     if not size:
         raise ValueError("Empty ROM")
     whole = hashlib.sha256()
+    part_hashes = []
     with archive.open("rb") as source:
         if size < limit:
             while block := source.read(BUFFER):
@@ -117,14 +120,15 @@ def assets(archive, temp, limit=ASSET_LIMIT, part_size=PART_SIZE):
                         digest.update(block)
                         output.write(block)
                         remaining -= len(block)
-                yield part, digest.hexdigest()
+                part_hashes.append(digest.hexdigest())
+                yield part, part_hashes[-1]
                 part.unlink()
     checksum = temp / (archive.name + ".sha256")
     checksum.write_bytes(f"{whole.hexdigest()}  {archive.name}\n".encode("ascii"))
     yield checksum, hashlib.sha256(checksum.read_bytes()).hexdigest()
     if size >= limit:
-        helper = temp / f"{archive.stem}-merge.bat"
-        data = merge_script(archive.name, (size + part_size - 1) // part_size, size, whole.hexdigest())
+        helper = temp / f"{archive.stem}-check-merge.bat"
+        data = merge_script(archive.name, part_hashes, size, whole.hexdigest())
         helper.write_bytes(data)
         yield helper, hashlib.sha256(data).hexdigest()
 
@@ -181,7 +185,8 @@ def notes_for(info):
 def add_entry(body, info, links, archive_name):
     marker = f"<!-- rom:{archive_name} -->"
     if marker in body:
-        return body
+        stem = Path(archive_name).stem
+        return body.replace(f"/{stem}-merge.bat)", f"/{stem}-check-merge.bat)")
     if INDEX not in body:
         raise ValueError("Device release is missing its ROM download index")
     mods = " · ".join(info["mods"]) or "默认"
@@ -212,7 +217,7 @@ def publish(folder):
     names = ([name] if count == 1 else [part_name(archive, i) for i in range(1, count + 1)])
     names.append(name + ".sha256")
     if count > 1:
-        names.append(f"{archive.stem}-merge.bat")
+        names.append(f"{archive.stem}-check-merge.bat")
     repo = os.environ["GH_REPO"]
     endpoint = f"repos/{repo}/releases"
     def find_or_create():
